@@ -1,0 +1,24 @@
+# Development-specific overrides
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      # Mount source code for hot-reload
+      - ./src:/app/src:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["uvicorn", "control_plane.app:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/src"]
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+
+  # Adminer for database management
+  adminer:
+    image: adminer:latest
+    container_name: control_plane_adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    restart: unless-stopped

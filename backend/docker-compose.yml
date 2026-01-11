@@ -1,0 +1,89 @@
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-alpine
+    container_name: control_plane_db
+    environment:
+      POSTGRES_USER: control_plane
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-control_plane_dev}
+      POSTGRES_DB: control_plane
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U control_plane"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis for caching and pub/sub (optional, for production)
+  redis:
+    image: redis:7-alpine
+    container_name: control_plane_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Control Plane API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: control_plane_api
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://control_plane:${POSTGRES_PASSWORD:-control_plane_dev}@postgres:5432/control_plane
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-secret-change-in-production}
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    ports:
+      - "8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Background worker (optional, for production)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: control_plane_worker
+    command: ["python", "-m", "control_plane.workers.worker"]
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://control_plane:${POSTGRES_PASSWORD:-control_plane_dev}@postgres:5432/control_plane
+      - ENVIRONMENT=development
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - with-worker
+
+volumes:
+  postgres_data:
+  redis_data:
