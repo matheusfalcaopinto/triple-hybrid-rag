@@ -1,0 +1,102 @@
+# Evolution API Docker Stack (Ported for Pipecat Agent)
+# WhatsApp Bridge via Baileys Protocol
+#
+# Usage:
+#   docker-compose up -d
+#
+# After startup:
+#   1. Access manager UI at http://localhost:8086/manager
+#   2. Create instance and scan QR code
+#   3. Configure EVOLUTION_API_URL in your .env to http://localhost:8086
+
+version: '3.9'
+
+services:
+  evolution_api:
+    image: atendai/evolution-api:v2.1.1
+    container_name: pipecat_evolution_api
+    restart: always
+    ports:
+      - "8086:8080"
+    environment:
+      # --- Server Configuration ---
+      - SERVER_URL=http://localhost:8086
+      - SERVER_PORT=8080
+
+      # --- Authentication ---
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-change-me-to-secure-uuid}
+
+      # --- Database (PostgreSQL) ---
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:evolution_pass@postgres:5432/evolution_api
+      - DATABASE_CONNECTION_CLIENT_NAME=evolution_api
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+
+      # --- Cache (Redis) ---
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/0
+      - CACHE_REDIS_PREFIX_KEY=evolution_v2
+
+      # --- Webhook Configuration ---
+      - WEBHOOK_GLOBAL_ENABLED=false
+      - WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS=false
+
+      # --- WebSocket for real-time events ---
+      - WEBSOCKET_ENABLED=true
+
+      # --- Instance Protection ---
+      - DEL_INSTANCE=false
+
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - evolution_net
+    volumes:
+      - evolution_instances:/evolution/instances
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: pipecat_evolution_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: evolution_api
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: evolution_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U evolution -d evolution_api" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - evolution_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: pipecat_evolution_redis
+    restart: always
+    # Enable AOF persistence for session keys
+    command: [ "redis-server", "--appendonly", "yes" ]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - evolution_net
+
+volumes:
+  evolution_instances:
+  postgres_data:
+  redis_data:
+
+networks:
+  evolution_net:
+    driver: bridge

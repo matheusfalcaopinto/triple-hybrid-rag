@@ -1,0 +1,33 @@
+# Environment
+.env
+*.env.local
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data & Credentials
+data/
+*.db
+*.sqlite
+*.json
+!database/schema.sql
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Build
+dist/
+build/
+*.egg-info/

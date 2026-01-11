@@ -1,0 +1,76 @@
+[project]
+name = "voice-agent-pipecat"
+version = "1.0.0"
+description = "Pipecat-based voice agent with MCP tools for CRM, Calendar, WhatsApp"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Pipecat Framework
+    "pipecat-ai[cartesia,openai,silero]>=0.0.98",
+
+    # FastAPI Server
+    "fastapi>=0.116.0",
+    "uvicorn>=0.30.0",
+    "python-multipart>=0.0.20",
+
+    # Configuration
+    "pydantic-settings>=2.12.0",
+    "python-dotenv>=1.1.0",
+
+    # Database
+    "supabase>=2.24.0",
+
+    # Google APIs (Calendar)
+    "google-api-python-client>=2.150.0",
+    "google-auth>=2.35.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+
+    # Communication
+    "twilio>=9.0.0",
+    "websockets>=15.0.0",
+    "httpx>=0.27.0",
+
+    # CLI & Utilities
+    "rich>=13.7.0",
+    "tenacity>=9.0.0",
+]
+
+[project.optional-dependencies]
+# WebRTC support for WhatsApp Calling (Meta Business API)
+webrtc = ["aiortc>=1.9.0", "aioice>=0.9.0", "av>=12.0.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "pyngrok>=7.0.0",
+]
+
+[project.scripts]
+voice-agent = "voice_agent.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voice_agent"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = "src"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning:httplib2.*",
+    "ignore::DeprecationWarning:supabase.*",
+    "ignore:.*audioop.*:DeprecationWarning",
+    "ignore:.*PydanticDeprecatedSince212.*",
+    "ignore::DeprecationWarning:pyiceberg.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

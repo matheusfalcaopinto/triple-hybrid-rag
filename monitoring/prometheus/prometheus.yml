@@ -1,0 +1,41 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'voice-agent-pipecat'
+
+# Alertmanager configuration (optional)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Load alert rules
+rule_files:
+  - 'alerts.yml'
+
+# Scrape configurations
+scrape_configs:
+  # Voice Agent Pipecat metrics endpoint
+  - job_name: 'voice_agent_pipecat'
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+    static_configs:
+      # Target 1: Internal Docker Network (Preferred when running in compose)
+      - targets: ['voice_agent:8000']
+        labels:
+          service: 'voice_agent_pipecat'
+          access: 'internal'
+      
+      # Target 2: Host Network (Fallback/Local Dev)
+      # Port 5051 corresponds to the Pipecat standalone agent mapping
+      - targets: ['host.docker.internal:5051']
+        labels:
+          service: 'voice_agent_pipecat'
+          access: 'external'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

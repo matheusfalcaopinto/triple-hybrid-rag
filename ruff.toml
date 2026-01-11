@@ -1,0 +1,15 @@
+
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    "legacy_version",
+    "docs",
+    "output_*.txt",
+    "tool_tests",
+    "services",
+    "tests/scripts",
+]
+
+[lint]
+select = ["E", "F", "I", "B"]
+ignore = []

@@ -1,0 +1,67 @@
+groups:
+  - name: voice_agent_v4_alerts
+    interval: 30s
+    rules:
+      # Provider rate limit alerts
+      - alert: CartesiaTTSRateLimitHigh
+        expr: rate(cartesia_tts_rate_limit_total[5m]) * 60 > 5
+        for: 2m
+        labels:
+          severity: warning
+          component: tts
+        annotations:
+          summary: "High Cartesia TTS rate limit hits"
+          description: "Cartesia TTS rate limit hits: {{ $value | humanize }} per minute"
+
+      - alert: CartesiaTTSRateLimitCritical
+        expr: rate(cartesia_tts_rate_limit_total[5m]) * 60 > 20
+        for: 1m
+        labels:
+          severity: critical
+          component: tts
+        annotations:
+          summary: "Critical Cartesia TTS rate limit hits"
+          description: "Cartesia TTS rate limit hits: {{ $value | humanize }} per minute. Consider scaling."
+
+      # Provider error alerts
+      - alert: CartesiaTTSErrorRateHigh
+        expr: rate(cartesia_tts_error_total[5m]) * 60 > 10
+        for: 3m
+        labels:
+          severity: warning
+          component: tts
+        annotations:
+          summary: "High Cartesia TTS error rate"
+          description: "Cartesia TTS errors: {{ $value | humanize }} per minute"
+
+      - alert: OpenAIStreamErrorRateHigh
+        expr: rate(openai_stream_error_total[5m]) * 60 > 5
+        for: 3m
+        labels:
+          severity: warning
+          component: llm
+        annotations:
+          summary: "High OpenAI stream error rate"
+          description: "OpenAI errors: {{ $value | humanize }} per minute"
+
+      # Timeout alerts
+      - alert: OpenAIStreamTimeoutHigh
+        expr: rate(openai_stream_timeout_total[5m]) * 60 > 3
+        for: 3m
+        labels:
+          severity: critical
+          component: llm
+        annotations:
+          summary: "High OpenAI stream timeout rate"
+          description: "OpenAI timeouts: {{ $value | humanize }} per minute. Check OpenAI API status."
+
+      # Latency alerts
+      - alert: TimeToFirstAudioSlow
+        expr: histogram_quantile(0.95, sum(rate(time_to_first_audio_ms_bucket[5m])) by (le)) > 2000
+        for: 5m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "Slow time to first audio (p95)"
+          description: "95th percentile time to first audio: {{ $value | humanize }}ms (threshold: 2000ms)"
