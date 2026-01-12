@@ -16,6 +16,8 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
     EndFrame,
+    FunctionCallInProgressFrame,
+    FunctionCallResultFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
@@ -56,12 +58,39 @@ class IdleHandlerProcessor(FrameProcessor):
         self._user_speaking = False
         self._call_active = True
         self._bot_has_spoken = False
+        self._tool_in_progress = False  # Suspend idle timer during tool execution
+        self._active_tool_calls: int = 0  # Track concurrent tool calls
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames and track user activity."""
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, UserStartedSpeakingFrame):
+        # Track tool call start - suspend idle timer during tool execution
+        if isinstance(frame, FunctionCallInProgressFrame):
+            self._active_tool_calls += 1
+            self._tool_in_progress = True
+            self._cancel_idle_timer()
+            logger.debug(
+                "Tool call started (active=%d), suspended idle timer",
+                self._active_tool_calls
+            )
+        
+        # Track tool call completion - resume idle timer when all tools complete
+        elif isinstance(frame, FunctionCallResultFrame):
+            self._active_tool_calls = max(0, self._active_tool_calls - 1)
+            if self._active_tool_calls == 0:
+                self._tool_in_progress = False
+                # Restart idle timer now that tool is done
+                if self._bot_has_spoken and not self._user_speaking:
+                    self._start_idle_timer()
+                logger.debug("All tool calls complete, resumed idle timer")
+            else:
+                logger.debug(
+                    "Tool call complete (active=%d remaining)",
+                    self._active_tool_calls
+                )
+
+        elif isinstance(frame, UserStartedSpeakingFrame):
             self._user_speaking = True
             self._reset_idle_timer()
             logger.debug("User started speaking, reset idle timer")
@@ -69,9 +98,12 @@ class IdleHandlerProcessor(FrameProcessor):
         elif isinstance(frame, UserStoppedSpeakingFrame):
             self._user_speaking = False
             # Only start idle timer after bot has had a chance to speak
-            if self._bot_has_spoken:
+            # and when no tool is in progress
+            if self._bot_has_spoken and not self._tool_in_progress:
                 self._start_idle_timer()
                 logger.debug("User stopped speaking, started idle timer")
+            elif self._tool_in_progress:
+                logger.debug("User stopped speaking, but tool in progress - timer suspended")
             else:
                 logger.debug("User stopped speaking, waiting for first bot response")
 
@@ -110,7 +142,10 @@ class IdleHandlerProcessor(FrameProcessor):
             # Wait for warning threshold
             await asyncio.sleep(self._warning_seconds)
 
-            if not self._call_active or self._user_speaking:
+            # Don't issue warnings if call ended, user is speaking, or tool is in progress
+            if not self._call_active or self._user_speaking or self._tool_in_progress:
+                if self._tool_in_progress:
+                    logger.debug("Idle timer expired but tool in progress, skipping warning")
                 return
 
             # Issue warning

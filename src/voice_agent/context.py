@@ -93,6 +93,9 @@ async def prefetch_customer_context(phone: str) -> CustomerContext:
     """
     Prefetch customer context from CRM based on phone number.
     
+    This function calls the MCP tools server directly (not via handlers)
+    to avoid FunctionCallParams signature issues during prefetch.
+    
     Args:
         phone: Caller's phone number
         
@@ -106,53 +109,56 @@ async def prefetch_customer_context(phone: str) -> CustomerContext:
         return context
     
     try:
-        # Import tools from the adapter
-        from voice_agent.tools import get_tool_handlers
+        # Import MCP server directly (bypasses handler layer)
+        from voice_agent.tools import get_mcp_server
         
-        handlers = get_tool_handlers()
+        server = get_mcp_server()
         
-        # Get customer by phone
-        if "get_customer_by_phone" in handlers:
-            handler = handlers["get_customer_by_phone"]
-            result = await handler(phone=phone)
+        # 1. Get customer by phone
+        result = await server.call_tool_async("get_customer_by_phone", {"phone": phone})
+        
+        if result.get("success") and result.get("result"):
+            customer_data = result["result"]
+            context.customer_id = customer_data.get("customer_id") or customer_data.get("id")
+            context.name = customer_data.get("name", "")
+            context.status = customer_data.get("status", "")
+            context.raw_data = customer_data
+            logger.info(
+                "Prefetched customer: id=%s, name=%s",
+                context.customer_id, context.name,
+            )
+        elif result.get("error"):
+            logger.warning("Failed to get customer by phone: %s", result.get("error"))
+        
+        # 2. Get customer facts (if we have an ID)
+        if context.customer_id:
+            result = await server.call_tool_async("get_customer_facts", {"customer_id": context.customer_id})
             
-            if result and not result.get("error"):
-                context.customer_id = result.get("customer_id") or result.get("id")
-                context.name = result.get("name", "")
-                context.status = result.get("status", "")
-                context.raw_data = result
-                logger.info(
-                    "Prefetched customer: id=%s, name=%s",
-                    context.customer_id, context.name,
-                )
+            if result.get("success") and result.get("result"):
+                facts_data = result["result"]
+                if isinstance(facts_data, list):
+                    context.facts = facts_data[:10]  # Limit to 10 facts
+                elif isinstance(facts_data, dict):
+                    context.facts = facts_data.get("facts", [])[:10]
         
-        # Get customer facts if we have an ID
-        if context.customer_id and "get_customer_facts" in handlers:
-            handler = handlers["get_customer_facts"]
-            result = await handler(customer_id=context.customer_id)
+        # 3. Get last call summary
+        if context.customer_id:
+            result = await server.call_tool_async("get_last_call", {"customer_id": context.customer_id})
             
-            if result and isinstance(result, list):
-                context.facts = result[:10]  # Limit facts
-            elif result and isinstance(result, dict):
-                context.facts = result.get("facts", [])[:10]
+            if result.get("success") and result.get("result"):
+                call_data = result["result"]
+                context.last_call_summary = call_data.get("summary", "")
         
-        # Get last call summary
-        if context.customer_id and "get_last_call" in handlers:
-            handler = handlers["get_last_call"]
-            result = await handler(customer_id=context.customer_id)
+        # 4. Get pending tasks
+        if context.customer_id:
+            result = await server.call_tool_async("get_pending_tasks", {"customer_id": context.customer_id})
             
-            if result and not result.get("error"):
-                context.last_call_summary = result.get("summary", "")
-        
-        # Get pending tasks
-        if context.customer_id and "get_pending_tasks" in handlers:
-            handler = handlers["get_pending_tasks"]
-            result = await handler(customer_id=context.customer_id)
-            
-            if result and isinstance(result, list):
-                context.pending_tasks = result[:5]
-            elif result and isinstance(result, dict):
-                context.pending_tasks = result.get("tasks", [])[:5]
+            if result.get("success") and result.get("result"):
+                tasks_data = result["result"]
+                if isinstance(tasks_data, list):
+                    context.pending_tasks = tasks_data[:5]  # Limit to 5 tasks
+                elif isinstance(tasks_data, dict):
+                    context.pending_tasks = tasks_data.get("tasks", [])[:5]
         
     except ImportError as e:
         logger.warning("Could not import tools for prefetch: %s", e)

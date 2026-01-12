@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from pipecat.audio.buffer import AudioBufferProcessor
+    from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 
 from ..config import SETTINGS
 
@@ -57,13 +57,16 @@ class RecordingService:
             return None
 
         try:
-            # Get audio data from buffer
-            # The buffer provides separate user and bot audio
-            user_audio = buffer.get_user_audio()
-            bot_audio = buffer.get_bot_audio() if SETTINGS.recording_include_bot_audio else None
-
-            if not user_audio and not bot_audio:
+            # Check if buffer has audio
+            if not buffer.has_audio():
                 logger.warning("No audio data in buffer for call_sid=%s", call_sid)
+                return None
+
+            # Get merged audio data from buffer (includes both user and bot audio)
+            audio_data = buffer.merge_audio_buffers()
+
+            if not audio_data:
+                logger.warning("Empty audio data from buffer for call_sid=%s", call_sid)
                 return None
 
             # Generate filename
@@ -74,8 +77,7 @@ class RecordingService:
             await asyncio.to_thread(
                 self._write_wav_file,
                 filepath,
-                user_audio,
-                bot_audio,
+                audio_data,
             )
 
             abs_path = str(filepath.absolute())
@@ -92,18 +94,9 @@ class RecordingService:
     def _write_wav_file(
         self,
         filepath: Path,
-        user_audio: bytes,
-        bot_audio: Optional[bytes],
+        audio_data: bytes,
     ) -> None:
         """Write audio data to WAV file (blocking, run in thread)."""
-        # If we have both user and bot audio, mix them
-        if bot_audio and user_audio:
-            # Simple mixing: interleave or combine
-            # For simplicity, we'll save user audio only in this version
-            audio_data = user_audio
-        else:
-            audio_data = user_audio or bot_audio or b""
-
         with wave.open(str(filepath), "wb") as wav_file:
             wav_file.setnchannels(1)  # Mono
             wav_file.setsampwidth(2)  # 16-bit

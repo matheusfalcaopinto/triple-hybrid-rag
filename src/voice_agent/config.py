@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     user_idle_warning_seconds: float = Field(8.0, alias="USER_IDLE_WARNING_SECONDS")
     user_idle_max_warnings: int = Field(2, alias="USER_IDLE_MAX_WARNINGS")
     mute_during_function_call: bool = Field(True, alias="MUTE_DURING_FUNCTION_CALL")
+    mute_function_call_duration: float = Field(3.0, alias="MUTE_FUNCTION_CALL_DURATION")
     mute_until_first_bot_speech: bool = Field(False, alias="MUTE_UNTIL_FIRST_BOT_SPEECH")
     
     # ──────────────────────────────────────────────────────────────────────────
@@ -177,6 +178,13 @@ class Settings(BaseSettings):
     evolution_timeout: float = Field(30.0, alias="EVOLUTION_TIMEOUT")
     
     # ──────────────────────────────────────────────────────────────────────────
+    # Startup Optimization Flags
+    # ──────────────────────────────────────────────────────────────────────────
+    eager_tool_loading: bool = Field(True, alias="EAGER_TOOL_LOADING")
+    direct_greeting_injection: bool = Field(True, alias="DIRECT_GREETING_INJECTION")
+    parallel_context_prefetch: bool = Field(True, alias="PARALLEL_CONTEXT_PREFETCH")
+    
+    # ──────────────────────────────────────────────────────────────────────────
     # Infrastructure / Networking
     # ──────────────────────────────────────────────────────────────────────────
     app_public_domain: Optional[str] = Field(None, alias="APP_PUBLIC_DOMAIN")
@@ -190,6 +198,13 @@ class Settings(BaseSettings):
     recording_format: str = Field("wav", alias="RECORDING_FORMAT")
     recording_sample_rate: int = Field(16000, alias="RECORDING_SAMPLE_RATE")
     recording_include_bot_audio: bool = Field(True, alias="RECORDING_INCLUDE_BOT_AUDIO")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # Post-Call Processing Configuration
+    # ──────────────────────────────────────────────────────────────────────────
+    auto_save_call_summary: bool = Field(True, alias="AUTO_SAVE_CALL_SUMMARY")
+    min_call_duration_to_save: float = Field(5.0, alias="MIN_CALL_DURATION_TO_SAVE")
+    use_ai_summary_generation: bool = Field(True, alias="USE_AI_SUMMARY_GENERATION")
     
     # ──────────────────────────────────────────────────────────────────────────
     # Derived Properties

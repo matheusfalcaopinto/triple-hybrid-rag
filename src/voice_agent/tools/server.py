@@ -13,7 +13,10 @@ import logging
 import platform
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pipecat.services.llm_service import FunctionCallParams
 
 logger = logging.getLogger("voice_agent_v4.mcp_tools")
 
@@ -171,14 +174,19 @@ class MCPToolsServer:
                     continue
                 
                 def make_handler(tn: str):
-                    async def handler(**kwargs: Any) -> Any:
+                    async def handler(params: "FunctionCallParams") -> None:
+                        """Handler that accepts Pipecat FunctionCallParams.
+                        
+                        Uses params.result_callback() to properly notify Pipecat of the result.
+                        """
                         if self.mcp_manager is None:
-                            return {"error": "MCP manager not initialized"}
-                        result = await self.mcp_manager.call_tool(tn, kwargs)
+                            await params.result_callback({"error": "MCP manager not initialized"})
+                            return
+                        result = await self.mcp_manager.call_tool(tn, params.arguments)
                         if result.get("success"):
-                            return result.get("result")
+                            await params.result_callback(result.get("result", {}))
                         else:
-                            return {"error": result.get("error")}
+                            await params.result_callback({"error": result.get("error", "Unknown error")})
                     return handler
                 
                 self.register_tool(

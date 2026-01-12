@@ -31,17 +31,124 @@ logging.basicConfig(
 logging.getLogger("pipecat").setLevel(logging.DEBUG)
 logger = logging.getLogger("voice_agent_pipecat.app")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Call Mapping Cache
+# ══════════════════════════════════════════════════════════════════════════════
+# Stores caller phone by Twilio CallSid to transfer data from incoming-call 
+# webhook to WebSocket handler. This is needed because Twilio may strip 
+# query params when connecting to the WebSocket.
+# Format: {call_sid: {"caller_phone": str, "timestamp": float}}
+_call_mapping: Dict[str, Dict[str, Any]] = {}
+_CALL_MAPPING_TTL = 300  # 5 minutes TTL for cleanup
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
-    # Startup
-    logger.info("Starting Voice Agent Pipecat")
+    """
+    Application lifespan manager with eager pre-initialization.
+    
+    This pre-loads resources at startup to eliminate per-call initialization delays:
+    - MCP Tools: Loaded once and cached for instant access
+    - Audio Clips: Pre-loaded and Base64-encoded for direct WebSocket injection
+    - Silero VAD: Model downloaded and warmed up
+    
+    Expected improvement: Reduce call startup latency from 2-3s to <100ms
+    """
+    import time
+    startup_start = time.monotonic()
+    
+    logger.info("═" * 60)
+    logger.info("Starting Voice Agent Pipecat - Pre-initialization Phase")
+    logger.info("═" * 60)
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 1: Pre-load MCP Tools (eliminates ~300-500ms per call)
+    # ══════════════════════════════════════════════════════════════════════════
+    cached_tools = None
+    cached_handlers = None
+    
+    if SETTINGS.eager_tool_loading:
+        try:
+            from .tools import get_all_tools, get_tool_handlers
+            
+            tools_start = time.monotonic()
+            cached_tools = get_all_tools()
+            cached_handlers = get_tool_handlers()
+            tools_time = (time.monotonic() - tools_start) * 1000
+            
+            logger.info(
+                "✓ Tools pre-loaded: %d tools in %.1fms",
+                len(cached_tools), tools_time
+            )
+        except Exception as e:
+            logger.warning("Tool pre-loading failed (will load per-call): %s", e)
+    else:
+        logger.info("⊘ Eager tool loading disabled")
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 2: Pre-load Greeting Audio (eliminates ~50-100ms per call)
+    # ══════════════════════════════════════════════════════════════════════════
+    if SETTINGS.greeting_audio_enabled:
+        try:
+            from .services.pre_recorded import preload_all_clips, get_clip_frames
+            
+            audio_start = time.monotonic()
+            await preload_all_clips()
+            audio_time = (time.monotonic() - audio_start) * 1000
+            
+            # Verify greeting is loaded
+            greeting_frames = get_clip_frames(SETTINGS.greeting_audio_clip)
+            if greeting_frames:
+                logger.info(
+                    "✓ Audio pre-loaded: %s = %d frames (~%.1fs) in %.1fms",
+                    SETTINGS.greeting_audio_clip,
+                    len(greeting_frames),
+                    len(greeting_frames) * 0.02,
+                    audio_time
+                )
+            else:
+                logger.warning("⚠ Greeting audio clip not found: %s", SETTINGS.greeting_audio_clip)
+        except Exception as e:
+            logger.warning("Audio pre-loading failed (will load per-call): %s", e)
+    else:
+        logger.info("⊘ Greeting audio disabled")
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 3: Warm up Silero VAD Model (eliminates ~200-500ms on first call)
+    # ══════════════════════════════════════════════════════════════════════════
+    try:
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
+        
+        vad_start = time.monotonic()
+        # Creating an instance downloads and loads the model
+        _vad_warmup = SileroVADAnalyzer()
+        # Explicitly delete to free memory (model will be cached for next use)
+        del _vad_warmup
+        vad_time = (time.monotonic() - vad_start) * 1000
+        
+        logger.info("✓ Silero VAD model pre-loaded in %.1fms", vad_time)
+    except Exception as e:
+        logger.warning("VAD warmup failed (will load on first call): %s", e)
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # Store cached resources in app.state for instant access during calls
+    # ══════════════════════════════════════════════════════════════════════════
+    app.state.cached_tools = cached_tools
+    app.state.cached_handlers = cached_handlers
+    app.state.startup_complete = True
+    
+    total_time = (time.monotonic() - startup_start) * 1000
+    logger.info("═" * 60)
+    logger.info(
+        "Pre-initialization complete in %.1fms - Ready for calls",
+        total_time
+    )
     logger.info("OpenAI Model: %s", SETTINGS.openai_model)
     logger.info("Cartesia TTS: %s", SETTINGS.cartesia_tts_model)
     logger.info("Cartesia STT: %s", SETTINGS.cartesia_stt_model)
     logger.info("VAD Threshold: %s", SETTINGS.vad_threshold)
+    logger.info("═" * 60)
     
     yield
     
@@ -316,6 +423,18 @@ async def incoming_call(request: Request) -> Response:
         separator = "&" if "?" in ws_url else "?"
         ws_url += f"{separator}call_sid={quote(call_sid_twilio)}"
     
+    # Store call mapping for WebSocket handler lookup
+    # This is needed because Twilio may not preserve query params in WebSocket
+    if call_sid_twilio and caller_phone:
+        _call_mapping[str(call_sid_twilio)] = {
+            "caller_phone": str(caller_phone),
+            "timestamp": time.time(),
+        }
+        logger.debug(
+            "Stored call mapping: %s -> %s",
+            call_sid_twilio, caller_phone[:6] + "****" if len(str(caller_phone)) > 6 else caller_phone
+        )
+    
     logger.info("Responding with stream URL: %s", ws_url)
     
     # Build TwiML response
@@ -342,7 +461,12 @@ def _build_stream_twiml(ws_url: str) -> str:
 async def media_stream(ws: WebSocket) -> None:
     """
     Handle Twilio Media Stream WebSocket connection.
+    
     This is where the Pipecat pipeline runs for each call.
+    
+    Optimization: If direct_greeting_injection is enabled, the greeting audio
+    is sent immediately via WebSocket BEFORE the pipeline is created, achieving
+    <100ms time-to-first-audio instead of 2-3 seconds.
     """
     await ws.accept()
     
@@ -381,6 +505,67 @@ async def media_stream(ws: WebSocket) -> None:
             stream_sid, twilio_call_sid,
         )
         
+        # ══════════════════════════════════════════════════════════════════════
+        # CALLER PHONE LOOKUP - Retrieve from call mapping if not in query params
+        # ══════════════════════════════════════════════════════════════════════
+        if not caller_phone and twilio_call_sid:
+            mapping = _call_mapping.get(twilio_call_sid)
+            if mapping:
+                caller_phone = mapping.get("caller_phone", "")
+                logger.info(
+                    "Retrieved caller_phone from mapping: %s for call_sid=%s",
+                    caller_phone[:6] + "****" if len(caller_phone) > 6 else caller_phone,
+                    twilio_call_sid
+                )
+                # Update session with correct phone
+                session.caller_phone = caller_phone
+                # Clean up mapping
+                del _call_mapping[twilio_call_sid]
+            else:
+                logger.warning(
+                    "No call mapping found for call_sid=%s, caller_phone will be empty",
+                    twilio_call_sid
+                )
+        
+        # Clean up old mappings (older than TTL)
+        current_time = time.time()
+        expired_keys = [
+            k for k, v in _call_mapping.items() 
+            if current_time - v.get("timestamp", 0) > _CALL_MAPPING_TTL
+        ]
+        for k in expired_keys:
+            del _call_mapping[k]
+        
+        # ══════════════════════════════════════════════════════════════════════
+        # IMMEDIATE GREETING - Send BEFORE pipeline creation
+        # This achieves <100ms time-to-first-audio
+        # ══════════════════════════════════════════════════════════════════════
+        greeting_task = None
+        skip_greeting_in_pipeline = False
+        
+        if (SETTINGS.greeting_audio_enabled and 
+            SETTINGS.direct_greeting_injection):
+            try:
+                from .services.pre_recorded import send_greeting_direct
+                
+                # Start sending greeting in background (non-blocking)
+                # This allows pipeline creation to happen in parallel
+                greeting_task = asyncio.create_task(
+                    send_greeting_direct(ws, stream_sid, SETTINGS.greeting_audio_clip),
+                    name=f"greeting-{call_sid[:8]}"
+                )
+                skip_greeting_in_pipeline = True
+                logger.info(
+                    "Immediate greeting playback started for call_sid=%s",
+                    call_sid
+                )
+            except Exception as e:
+                logger.warning("Direct greeting failed, will use pipeline: %s", e)
+        
+        # ══════════════════════════════════════════════════════════════════════
+        # PIPELINE CREATION - Runs while greeting is playing
+        # ══════════════════════════════════════════════════════════════════════
+        
         # Create Twilio serializer
         serializer = TwilioFrameSerializer(
             stream_sid=stream_sid,
@@ -401,11 +586,26 @@ async def media_stream(ws: WebSocket) -> None:
             ),
         )
         
+        # Get pre-cached tools from app state (loaded at startup)
+        cached_tools = getattr(app.state, "cached_tools", None)
+        cached_handlers = getattr(app.state, "cached_handlers", None)
+        
+        # Wait for greeting to complete before running pipeline
+        # (to avoid audio overlap issues)
+        if greeting_task:
+            try:
+                await greeting_task
+            except Exception as e:
+                logger.warning("Greeting task error: %s", e)
+        
         # Run the bot pipeline
         await run_bot(
             transport=transport,
             caller_phone=caller_phone,
             call_sid=call_sid,
+            tools=cached_tools,
+            tool_handlers=cached_handlers,
+            skip_greeting=skip_greeting_in_pipeline,
         )
         
     except WebSocketDisconnect:

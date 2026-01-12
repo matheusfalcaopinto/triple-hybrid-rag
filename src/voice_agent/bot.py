@@ -17,7 +17,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
-    from pipecat.audio.buffer import AudioBufferProcessor
+    from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
     AUDIO_BUFFER_AVAILABLE = True
 except ImportError:
     AUDIO_BUFFER_AVAILABLE = False
@@ -42,6 +42,8 @@ from .context import (
     build_system_prompt_with_context,
 )
 from .processors.idle_handler import IdleHandlerProcessor
+from .processors.tool_call_muter import ToolCallMuterProcessor
+from .services.post_call import process_post_call
 
 logger = logging.getLogger("voice_agent_pipecat.bot")
 
@@ -55,7 +57,7 @@ async def create_bot_pipeline(
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_handlers: Optional[Dict[str, Callable]] = None,
     enable_prefetch: bool = True,
-) -> Tuple[PipelineTask, Optional["AudioBufferProcessor"]]:
+) -> Tuple[PipelineTask, Optional["AudioBufferProcessor"], "OpenAILLMContext"]:
     """
     Create a Pipecat pipeline for voice agent processing.
     
@@ -79,25 +81,39 @@ async def create_bot_pipeline(
     )
     
     # ──────────────────────────────────────────────────────────────────────────
-    # Customer Context Prefetch
+    # Customer Context Prefetch (Parallel or Blocking based on config)
     # ──────────────────────────────────────────────────────────────────────────
     
     customer_context: Optional[CustomerContext] = None
+    prefetch_task: Optional[asyncio.Task] = None
+    
     if enable_prefetch and caller_phone:
-        try:
-            customer_context = await asyncio.wait_for(
+        if SETTINGS.parallel_context_prefetch:
+            # NON-BLOCKING: Start prefetch in background, inject later
+            prefetch_task = asyncio.create_task(
                 prefetch_customer_context(caller_phone),
-                timeout=SETTINGS.prefetch_timeout,
+                name=f"prefetch-{call_sid[:8]}"
             )
             logger.info(
-                "Customer context prefetched: known=%s, name=%s",
-                customer_context.is_known,
-                customer_context.name or "N/A",
+                "Started background customer prefetch for %s",
+                caller_phone[:6] + "****" if len(caller_phone) > 6 else caller_phone
             )
-        except asyncio.TimeoutError:
-            logger.warning("Customer prefetch timed out")
-        except Exception as e:
-            logger.warning("Customer prefetch failed: %s", e)
+        else:
+            # BLOCKING: Wait for prefetch to complete (legacy behavior)
+            try:
+                customer_context = await asyncio.wait_for(
+                    prefetch_customer_context(caller_phone),
+                    timeout=SETTINGS.prefetch_timeout,
+                )
+                logger.info(
+                    "Customer context prefetched: known=%s, name=%s",
+                    customer_context.is_known,
+                    customer_context.name or "N/A",
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Customer prefetch timed out")
+            except Exception as e:
+                logger.warning("Customer prefetch failed: %s", e)
     
     # ──────────────────────────────────────────────────────────────────────────
     # Initialize AI Services
@@ -170,6 +186,8 @@ async def create_bot_pipeline(
             sample_rate=SETTINGS.recording_sample_rate,
             num_channels=1,
         )
+        # Start recording immediately
+        audio_buffer.start_recording()
         logger.info("Audio recording enabled for call_sid=%s", call_sid)
     elif SETTINGS.recording_enabled and not AUDIO_BUFFER_AVAILABLE:
         logger.warning("Recording enabled but AudioBufferProcessor not available")
@@ -193,12 +211,29 @@ async def create_bot_pipeline(
     )
     
     # ──────────────────────────────────────────────────────────────────────────
+    # Tool Call Muter (Mute user briefly after tool calls start)
+    # ──────────────────────────────────────────────────────────────────────────
+    
+    tool_call_muter = ToolCallMuterProcessor(
+        mute_duration=SETTINGS.mute_function_call_duration,
+        enabled=SETTINGS.mute_during_function_call,
+    )
+    if SETTINGS.mute_during_function_call:
+        logger.info(
+            "Tool call muter enabled - user muted for %.1fs after tool call starts",
+            SETTINGS.mute_function_call_duration
+        )
+    else:
+        logger.info("Tool call muter disabled")
+    
+    # ──────────────────────────────────────────────────────────────────────────
     # Build Pipeline
     # ──────────────────────────────────────────────────────────────────────────
     
     # The pipeline flows:
-    # Input -> [AudioBuffer] -> STT -> Context(user) -> LLM -> TTS -> Output -> Context(assistant)
+    # Input -> [AudioBuffer] -> STT -> ToolMuter -> IdleHandler -> Context(user) -> LLM -> TTS -> Output -> Context(assistant)
     # Note: VAD is now handled by the transport's VADAnalyzer
+    # Note: ToolMuter drops user transcription while tools are executing
     
     # Build pipeline with conditional audio buffer
     pipeline_processors = [
@@ -210,6 +245,7 @@ async def create_bot_pipeline(
     
     pipeline_processors.extend([
         stt,                             # Speech-to-text
+        tool_call_muter,                 # Mute user during tool execution
         idle_handler,                    # User inactivity detection
         context_aggregator.user(),       # Add user message to context
         llm,                             # LLM processing (with function calling)
@@ -235,20 +271,81 @@ async def create_bot_pipeline(
         ),
     )
     
+    # ──────────────────────────────────────────────────────────────────────────
+    # Background Context Injection (for parallel prefetch)
+    # ──────────────────────────────────────────────────────────────────────────
+    
+    if prefetch_task is not None:
+        async def inject_customer_context():
+            """Inject customer context when prefetch completes."""
+            try:
+                customer_ctx = await asyncio.wait_for(
+                    prefetch_task,
+                    timeout=SETTINGS.prefetch_timeout
+                )
+                
+                if customer_ctx and customer_ctx.is_known:
+                    logger.info(
+                        "Injecting customer context: id=%s, name=%s",
+                        customer_ctx.customer_id,
+                        customer_ctx.name or "Unknown"
+                    )
+                    
+                    # Build enhanced prompt with customer data
+                    enhanced_prompt = build_system_prompt_with_context(
+                        base_prompt,
+                        customer_context=customer_ctx,
+                        caller_phone=caller_phone,
+                    )
+                    
+                    # Update the LLM context with customer info
+                    # This injects a new system message with the customer context
+                    await task.queue_frames([
+                        OpenAILLMContextFrame(
+                            context=OpenAILLMContext(
+                                messages=[{"role": "system", "content": enhanced_prompt}],
+                                tools=tools or []
+                            )
+                        )
+                    ])
+                    logger.info("Customer context injected successfully")
+                else:
+                    logger.info("No customer context to inject (unknown caller)")
+                    
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Customer prefetch timed out for %s",
+                    caller_phone[:6] + "****" if len(caller_phone) > 6 else caller_phone
+                )
+            except asyncio.CancelledError:
+                logger.debug("Customer prefetch cancelled")
+            except Exception as e:
+                logger.error("Failed to inject customer context: %s", e)
+        
+        # Start context injection in background (fire-and-forget)
+        asyncio.create_task(
+            inject_customer_context(),
+            name=f"inject-{call_sid[:8]}"
+        )
+    
     setup_time = (time.monotonic() - start_time) * 1000
     logger.info(
-        "Pipecat pipeline created in %.1fms for call_sid=%s",
+        "Pipecat pipeline created in %.1fms for call_sid=%s%s",
         setup_time,
         call_sid,
+        " (context loading in background)" if prefetch_task else "",
     )
     
-    return task, audio_buffer
+    return task, audio_buffer, context
 
 
 async def run_bot(
     transport: Any,
     caller_phone: str = "",
     call_sid: str = "",
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_handlers: Optional[Dict[str, Callable]] = None,
+    skip_greeting: bool = False,
 ) -> None:
     """
     Run the bot pipeline to completion.
@@ -257,24 +354,34 @@ async def run_bot(
         transport: The transport layer
         caller_phone: Caller's phone number
         call_sid: Call identifier
+        tools: Pre-cached tool definitions (from app.state)
+        tool_handlers: Pre-cached tool handlers (from app.state)
+        skip_greeting: If True, skip playing greeting (already sent via direct injection)
     """
-    # Import tools dynamically to avoid circular imports
-    from .tools import get_all_tools, get_tool_handlers
-    
-    tools = get_all_tools()
-    handlers = get_tool_handlers()
+    # Use pre-cached tools if provided, otherwise load dynamically
+    if tools is None or tool_handlers is None:
+        # Fallback: Import tools dynamically (slower path)
+        from .tools import get_all_tools, get_tool_handlers
+        tools = tools or get_all_tools()
+        tool_handlers = tool_handlers or get_tool_handlers()
+        logger.info("Tools loaded dynamically (not pre-cached)")
+    else:
+        logger.info("Using pre-cached tools from app.state")
     
     logger.info(
         "Starting bot with %d tools for call_sid=%s",
         len(tools), call_sid,
     )
     
-    task, audio_buffer = await create_bot_pipeline(
+    # Track call start time for duration calculation
+    call_start_time = time.monotonic()
+    
+    task, audio_buffer, llm_context = await create_bot_pipeline(
         transport,
         caller_phone=caller_phone,
         call_sid=call_sid,
         tools=tools,
-        tool_handlers=handlers,
+        tool_handlers=tool_handlers,
     )
     
     try:
@@ -283,9 +390,9 @@ async def run_bot(
         # Import frame types
         from pipecat.frames.frames import LLMRunFrame, OutputAudioRawFrame
         
-        # Play pre-recorded greeting immediately (client is already connected)
-        greeting_played = False
-        if SETTINGS.greeting_audio_enabled:
+        # Play pre-recorded greeting (unless already sent via direct injection)
+        greeting_played = skip_greeting  # If skip_greeting=True, consider it already played
+        if SETTINGS.greeting_audio_enabled and not skip_greeting:
             try:
                 from .services.pre_recorded import get_clip_frames
                 frames = get_clip_frames(SETTINGS.greeting_audio_clip)
@@ -329,9 +436,15 @@ async def run_bot(
         logger.exception("Bot pipeline error for call_sid=%s: %s", call_sid, e)
         raise
     finally:
+        # Calculate call duration
+        call_duration = time.monotonic() - call_start_time
+        
         # Save recording on call end
         if audio_buffer and SETTINGS.recording_enabled:
             try:
+                # Stop recording first
+                audio_buffer.stop_recording()
+                
                 from .services.recording import get_recording_service
                 recording_service = get_recording_service()
                 recording_path = await recording_service.save_recording(
@@ -343,6 +456,32 @@ async def run_bot(
                     logger.info("Recording saved: %s", recording_path)
             except Exception as e:
                 logger.error("Failed to save recording: %s", e)
+        
+        # Post-call processing: Save call summary to CRM
+        if SETTINGS.auto_save_call_summary:
+            try:
+                # Extract messages from LLM context
+                messages = list(llm_context.messages) if llm_context and hasattr(llm_context, 'messages') else []
+                
+                logger.info(
+                    "Starting post-call processing: call_sid=%s, duration=%.1fs, messages=%d",
+                    call_sid, call_duration, len(messages)
+                )
+                
+                # Process post-call asynchronously (fire-and-forget)
+                asyncio.create_task(
+                    process_post_call(
+                        call_sid=call_sid,
+                        caller_phone=caller_phone,
+                        duration=call_duration,
+                        messages=messages,
+                        customer_id=None,  # Will be looked up by phone
+                    ),
+                    name=f"post-call-{call_sid[:8]}"
+                )
+                
+            except Exception as e:
+                logger.error("Failed to start post-call processing: %s", e)
         
         logger.info("Bot pipeline completed for call_sid=%s", call_sid)
 

@@ -75,8 +75,7 @@ class TestRecordingService:
         service = RecordingService()
         
         mock_buffer = MagicMock()
-        mock_buffer.get_user_audio.return_value = None
-        mock_buffer.get_bot_audio.return_value = None
+        mock_buffer.has_audio.return_value = False
         
         result = asyncio.run(service.save_recording(mock_buffer, "call-123"))
         assert result is None
@@ -87,10 +86,10 @@ class TestRecordingService:
         
         service = RecordingService()
         
-        # Mock audio buffer with some audio data
+        # Mock audio buffer with some audio data (new API)
         mock_buffer = MagicMock()
-        mock_buffer.get_user_audio.return_value = b"\x00\x00" * 8000  # 0.5 second of silence at 16kHz
-        mock_buffer.get_bot_audio.return_value = None
+        mock_buffer.has_audio.return_value = True
+        mock_buffer.merge_audio_buffers.return_value = b"\x00\x00" * 8000  # 0.5 second of silence at 16kHz
         
         result = asyncio.run(service.save_recording(mock_buffer, "call-123", "+5511999999999"))
         
@@ -108,7 +107,7 @@ class TestRecordingService:
         filepath = Path(temp_recordings_dir) / "test.wav"
         audio_data = b"\x00\x00" * 1600  # ~0.1 second
         
-        service._write_wav_file(filepath, audio_data, None)
+        service._write_wav_file(filepath, audio_data)
         
         assert filepath.exists()
         assert filepath.stat().st_size > 0

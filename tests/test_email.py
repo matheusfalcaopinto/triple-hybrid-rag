@@ -11,11 +11,16 @@ from voice_agent.tools.email import (
     get_smtp_config,
     send_bulk_email,
     send_bulk_email_async,
+    send_bulk_email_fire_and_forget,
     send_email,
     send_email_async,
+    send_email_fire_and_forget,
     send_email_template,
     send_email_template_async,
+    send_email_template_fire_and_forget,
     send_html_email,
+    send_html_email_async,
+    send_html_email_fire_and_forget,
 )
 
 
@@ -288,12 +293,12 @@ class TestToolDefinitions:
         assert len(names) == len(set(names))
     
     def test_tool_handlers_valid(self):
-        """Test that all handlers are valid functions"""
+        """Test that all handlers are valid fire-and-forget functions for instant response"""
         expected_handlers = {
-            "send_email": send_email,
-            "send_html_email": send_html_email,
-            "send_bulk_email": send_bulk_email,
-            "send_email_template": send_email_template,
+            "send_email": send_email_fire_and_forget,
+            "send_html_email": send_html_email_fire_and_forget,
+            "send_bulk_email": send_bulk_email_fire_and_forget,
+            "send_email_template": send_email_template_fire_and_forget,
         }
         
         for tool in TOOL_DEFINITIONS:

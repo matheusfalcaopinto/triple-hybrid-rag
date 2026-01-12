@@ -600,14 +600,200 @@ async def send_template_message_async(
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Fire-and-Forget Handlers (Evolution API)
+# ══════════════════════════════════════════════════════════════════════════════
+# These handlers return immediately and process in background.
+# The agent can confirm "WhatsApp sendo enviado" without waiting for API response.
+
+async def _fire_and_forget_task(
+    coro_func,
+    args: tuple,
+    description: str,
+) -> None:
+    """Execute a coroutine in background and log result."""
+    try:
+        result = await coro_func(*args)
+        if result.get("success"):
+            logger.info(
+                "[Fire-and-Forget] %s succeeded: to=%s",
+                description,
+                result.get("to", "unknown"),
+            )
+        else:
+            logger.error(
+                "[Fire-and-Forget] %s failed: %s",
+                description,
+                result.get("error", "Unknown error"),
+            )
+    except Exception as exc:
+        logger.exception("[Fire-and-Forget] %s exception: %s", description, exc)
+
+
+async def send_text_message_fire_and_forget(
+    to: str,
+    message: str,
+    from_number: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget WhatsApp text message via Evolution API."""
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_text_message_async,
+            (to, message, from_number),
+            f"WhatsApp to {to}",
+        )
+    )
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"WhatsApp para {to} está sendo enviado",
+        "to": to,
+    }
+
+
+async def send_image_fire_and_forget(
+    to: str,
+    image_url: str,
+    caption: Optional[str] = None,
+    from_number: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget WhatsApp image via Evolution API."""
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_image_async,
+            (to, image_url, caption, from_number),
+            f"WhatsApp image to {to}",
+        )
+    )
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Imagem WhatsApp para {to} está sendo enviada",
+        "to": to,
+    }
+
+
+async def send_video_fire_and_forget(
+    to: str,
+    video_url: str,
+    caption: Optional[str] = None,
+    from_number: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget WhatsApp video via Evolution API."""
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_video_async,
+            (to, video_url, caption, from_number),
+            f"WhatsApp video to {to}",
+        )
+    )
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Vídeo WhatsApp para {to} está sendo enviado",
+        "to": to,
+    }
+
+
+async def send_document_fire_and_forget(
+    to: str,
+    document_url: str,
+    filename: Optional[str] = None,
+    from_number: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget WhatsApp document via Evolution API."""
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_document_async,
+            (to, document_url, filename, from_number),
+            f"WhatsApp document to {to}",
+        )
+    )
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Documento WhatsApp para {to} está sendo enviado",
+        "to": to,
+    }
+
+
+async def send_audio_fire_and_forget(
+    to: str,
+    audio_url: str,
+    from_number: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget WhatsApp audio via Evolution API."""
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_audio_async,
+            (to, audio_url, from_number),
+            f"WhatsApp audio to {to}",
+        )
+    )
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Áudio WhatsApp para {to} está sendo enviado",
+        "to": to,
+    }
+
+
+async def send_location_fire_and_forget(
+    to: str,
+    latitude: float,
+    longitude: float,
+    name: Optional[str] = None,
+    address: Optional[str] = None,
+    from_number: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget WhatsApp location via Evolution API."""
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_location_async,
+            (to, latitude, longitude, name, address, from_number),
+            f"WhatsApp location to {to}",
+        )
+    )
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Localização WhatsApp para {to} está sendo enviada",
+        "to": to,
+    }
+
+
+async def send_template_message_fire_and_forget(
+    to: str,
+    content_sid: str,
+    content_variables: Optional[Any] = None,
+    from_number: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget WhatsApp template message via Evolution API."""
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_template_message_async,
+            (to, content_sid, content_variables, from_number),
+            f"WhatsApp template to {to}",
+        )
+    )
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Template WhatsApp para {to} está sendo enviado",
+        "to": to,
+        "template": content_sid,
+    }
+
+
 # =============================================================================
 # Tool Definitions for MCP Server
+# NOTE: Using fire-and-forget handlers for instant response to the agent.
 # =============================================================================
 
 TOOL_DEFINITIONS = [
     {
         "name": "send_whatsapp_message",
-        "description": "Send a text message via WhatsApp using Evolution API.",
+        "description": "Send a text message via WhatsApp using Evolution API. Returns immediately while message sends in background.",
         "parameters": {
             "to": {
                 "type": "string",
@@ -623,11 +809,11 @@ TOOL_DEFINITIONS = [
             }
         },
         "required": ["to", "message"],
-        "handler": send_text_message,
+        "handler": send_text_message_fire_and_forget,  # Fire-and-forget for instant response
     },
     {
         "name": "send_whatsapp_image",
-        "description": "Send an image via WhatsApp. Image must be publicly accessible.",
+        "description": "Send an image via WhatsApp. Image must be publicly accessible. Returns immediately while message sends in background.",
         "parameters": {
             "to": {"type": "string", "description": "Recipient phone with country code"},
             "image_url": {"type": "string", "description": "Public URL of the image"},
@@ -635,11 +821,11 @@ TOOL_DEFINITIONS = [
             "from_number": {"type": "string", "description": "Ignored for Evolution API"}
         },
         "required": ["to", "image_url"],
-        "handler": send_image,
+        "handler": send_image_fire_and_forget,  # Fire-and-forget for instant response
     },
     {
         "name": "send_whatsapp_video",
-        "description": "Send a video via WhatsApp.",
+        "description": "Send a video via WhatsApp. Returns immediately while message sends in background.",
         "parameters": {
             "to": {"type": "string", "description": "Recipient phone with country code"},
             "video_url": {"type": "string", "description": "Public URL of the video"},
@@ -647,11 +833,11 @@ TOOL_DEFINITIONS = [
             "from_number": {"type": "string", "description": "Ignored for Evolution API"}
         },
         "required": ["to", "video_url"],
-        "handler": send_video,
+        "handler": send_video_fire_and_forget,  # Fire-and-forget for instant response
     },
     {
         "name": "send_whatsapp_document",
-        "description": "Send a document via WhatsApp.",
+        "description": "Send a document via WhatsApp. Returns immediately while message sends in background.",
         "parameters": {
             "to": {"type": "string", "description": "Recipient phone with country code"},
             "document_url": {"type": "string", "description": "Public URL of the document"},
@@ -659,18 +845,18 @@ TOOL_DEFINITIONS = [
             "from_number": {"type": "string", "description": "Ignored for Evolution API"}
         },
         "required": ["to", "document_url"],
-        "handler": send_document,
+        "handler": send_document_fire_and_forget,  # Fire-and-forget for instant response
     },
     {
         "name": "send_whatsapp_audio",
-        "description": "Send an audio file via WhatsApp.",
+        "description": "Send an audio file via WhatsApp. Returns immediately while message sends in background.",
         "parameters": {
             "to": {"type": "string", "description": "Recipient phone with country code"},
             "audio_url": {"type": "string", "description": "Public URL of the audio"},
             "from_number": {"type": "string", "description": "Ignored for Evolution API"}
         },
         "required": ["to", "audio_url"],
-        "handler": send_audio,
+        "handler": send_audio_fire_and_forget,  # Fire-and-forget for instant response
     },
     {
         "name": "send_whatsapp_generated_audio",
@@ -681,11 +867,11 @@ TOOL_DEFINITIONS = [
             "from_number": {"type": "string", "description": "Ignored for Evolution API"}
         },
         "required": ["to", "message"],
-        "handler": send_generated_audio,
+        "handler": send_generated_audio,  # Already async, doesn't need fire-and-forget (fast TTS)
     },
     {
         "name": "send_whatsapp_location",
-        "description": "Send a location via WhatsApp as a Google Maps link.",
+        "description": "Send a location via WhatsApp as a Google Maps link. Returns immediately while message sends in background.",
         "parameters": {
             "to": {"type": "string", "description": "Recipient phone with country code"},
             "latitude": {"type": "number", "description": "Location latitude"},
@@ -695,11 +881,11 @@ TOOL_DEFINITIONS = [
             "from_number": {"type": "string", "description": "Ignored for Evolution API"}
         },
         "required": ["to", "latitude", "longitude"],
-        "handler": send_location,
+        "handler": send_location_fire_and_forget,  # Fire-and-forget for instant response
     },
     {
         "name": "send_whatsapp_template",
-        "description": "Send a template message (falls back to text with Baileys).",
+        "description": "Send a template message (falls back to text with Baileys). Returns immediately while message sends in background.",
         "parameters": {
             "to": {"type": "string", "description": "Recipient phone with country code"},
             "content_sid": {"type": "string", "description": "Template ID"},
@@ -711,6 +897,6 @@ TOOL_DEFINITIONS = [
             "from_number": {"type": "string", "description": "Ignored for Evolution API"}
         },
         "required": ["to", "content_sid"],
-        "handler": send_template_message,
+        "handler": send_template_message_fire_and_forget,  # Fire-and-forget for instant response
     },
 ]

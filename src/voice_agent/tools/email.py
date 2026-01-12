@@ -483,13 +483,151 @@ async def send_email_template_async(
     return await asyncio.to_thread(send_email_template, to, template, variables)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Fire-and-Forget Handlers
+# ══════════════════════════════════════════════════════════════════════════════
+# These handlers return immediately and process in background.
+# The agent can confirm "Email sendo enviado" without waiting 15-20s for SMTP.
+
+async def _fire_and_forget_task(
+    coro_func,
+    args: tuple,
+    description: str,
+) -> None:
+    """Execute a coroutine in background and log result."""
+    try:
+        result = await coro_func(*args)
+        if result.get("success"):
+            logger.info(
+                "[Fire-and-Forget] %s succeeded: to=%s",
+                description,
+                result.get("to", "unknown"),
+            )
+        else:
+            logger.error(
+                "[Fire-and-Forget] %s failed: %s",
+                description,
+                result.get("error", "Unknown error"),
+            )
+    except Exception as exc:
+        logger.exception("[Fire-and-Forget] %s exception: %s", description, exc)
+
+
+async def send_email_fire_and_forget(
+    to: str,
+    subject: str,
+    body: str,
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+    html: bool = False,
+) -> Dict[str, Any]:
+    """
+    Fire-and-forget email sender.
+    
+    Returns immediately with 'queued' status while email sends in background.
+    The agent can confirm the action without waiting for SMTP.
+    """
+    # Create background task
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_email_async,
+            (to, subject, body, cc, bcc, html),
+            f"Email to {to}",
+        )
+    )
+    
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Email para {to} está sendo enviado",
+        "to": to,
+        "subject": subject,
+    }
+
+
+async def send_html_email_fire_and_forget(
+    to: str,
+    subject: str,
+    html_body: str,
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget HTML email sender."""
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_html_email_async,
+            (to, subject, html_body, cc, bcc),
+            f"HTML Email to {to}",
+        )
+    )
+    
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Email HTML para {to} está sendo enviado",
+        "to": to,
+        "subject": subject,
+    }
+
+
+async def send_bulk_email_fire_and_forget(
+    recipients: str,
+    subject: str,
+    body: str,
+    html: bool = False,
+) -> Dict[str, Any]:
+    """Fire-and-forget bulk email sender."""
+    recipient_count = len([r.strip() for r in recipients.split(",") if r.strip()])
+    
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_bulk_email_async,
+            (recipients, subject, body, html),
+            f"Bulk Email to {recipient_count} recipients",
+        )
+    )
+    
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Emails para {recipient_count} destinatários estão sendo enviados",
+        "recipients": recipients,
+        "subject": subject,
+    }
+
+
+async def send_email_template_fire_and_forget(
+    to: str,
+    template: str,
+    variables: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget template email sender."""
+    asyncio.create_task(
+        _fire_and_forget_task(
+            send_email_template_async,
+            (to, template, variables),
+            f"Template Email ({template}) to {to}",
+        )
+    )
+    
+    return {
+        "success": True,
+        "status": "queued",
+        "message": f"Email de template '{template}' para {to} está sendo enviado",
+        "to": to,
+        "template": template,
+    }
+
+
 # Tool definitions for MCP
+# NOTE: Using fire-and-forget handlers for instant response to the agent.
+# The email is queued and sent in background while agent continues conversation.
 TOOL_DEFINITIONS = [
     {
         "name": "send_email",
         "description": (
             "Send an email via SMTP with optional HTML content and CC/BCC "
-            "recipients."
+            "recipients. Returns immediately while email sends in background."
         ),
         "parameters": {
             "to": {
@@ -518,11 +656,11 @@ TOOL_DEFINITIONS = [
             },
         },
         "required": ["to", "subject", "body"],
-        "handler": send_email,
+        "handler": send_email_fire_and_forget,  # Fire-and-forget for instant response
     },
     {
         "name": "send_html_email",
-        "description": "Send an HTML-formatted email with styling and formatting via SMTP.",
+        "description": "Send an HTML-formatted email with styling and formatting via SMTP. Returns immediately while email sends in background.",
         "parameters": {
             "to": {
                 "type": "string",
@@ -546,11 +684,11 @@ TOOL_DEFINITIONS = [
             },
         },
         "required": ["to", "subject", "html_body"],
-        "handler": send_html_email,
+        "handler": send_html_email_fire_and_forget,  # Fire-and-forget for instant response
     },
     {
         "name": "send_bulk_email",
-        "description": "Send the same email to multiple recipients at once (bulk/broadcast email).",
+        "description": "Send the same email to multiple recipients at once (bulk/broadcast email). Returns immediately while emails send in background.",
         "parameters": {
             "recipients": {
                 "type": "string",
@@ -570,13 +708,14 @@ TOOL_DEFINITIONS = [
             },
         },
         "required": ["recipients", "subject", "body"],
-        "handler": send_bulk_email,
+        "handler": send_bulk_email_fire_and_forget,  # Fire-and-forget for instant response
     },
     {
         "name": "send_email_template",
         "description": (
             "Send an email using a predefined template (order_confirmation, "
-            "appointment_reminder, welcome, or invoice) with variable substitution."
+            "appointment_reminder, welcome, or invoice) with variable substitution. "
+            "Returns immediately while email sends in background."
         ),
         "parameters": {
             "to": {
@@ -599,6 +738,6 @@ TOOL_DEFINITIONS = [
             },
         },
         "required": ["to", "template"],
-        "handler": send_email_template,
+        "handler": send_email_template_fire_and_forget,  # Fire-and-forget for instant response
     },
 ]
