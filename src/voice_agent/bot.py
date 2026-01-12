@@ -16,8 +16,6 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
 try:
     from pipecat.audio.buffer import AudioBufferProcessor
     AUDIO_BUFFER_AVAILABLE = True
@@ -25,9 +23,8 @@ except ImportError:
     AUDIO_BUFFER_AVAILABLE = False
     AudioBufferProcessor = None
 
-from .processors.vad_frame_processor import VADFrameProcessor
-
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import (
     OpenAILLMContext,
@@ -111,14 +108,18 @@ async def create_bot_pipeline(
         api_key=SETTINGS.cartesia_api_key,
         model=SETTINGS.cartesia_stt_model,
         language=SETTINGS.cartesia_stt_language,
+        sample_rate=8000,  # Twilio uses 8kHz audio
     )
     
     # Text-to-Speech (Cartesia Sonic)
+    # Import Language enum for Portuguese
+    from pipecat.transcriptions.language import Language
     tts = CartesiaTTSService(
         api_key=SETTINGS.cartesia_api_key,
         voice_id=SETTINGS.cartesia_voice_id,
         model=SETTINGS.cartesia_tts_model,
         sample_rate=SETTINGS.cartesia_sample_rate,  # Twilio µ-law 8kHz
+        params=CartesiaTTSService.InputParams(language=Language.PT),
     )
     
     # LLM (OpenAI with function calling)
@@ -149,6 +150,7 @@ async def create_bot_pipeline(
     )
     
     # Create LLM context with system message
+    # Note: Initial greeting uses pre-recorded audio, not LLM-generated
     messages = [
         {"role": "system", "content": system_prompt},
     ]
@@ -156,18 +158,7 @@ async def create_bot_pipeline(
     context = OpenAILLMContext(messages=messages, tools=tools or [])
     context_aggregator = llm.create_context_aggregator(context)
     
-    # ──────────────────────────────────────────────────────────────────────────
-    # VAD (Voice Activity Detection)
-    # ──────────────────────────────────────────────────────────────────────────
-    
-    vad_analyzer = SileroVADAnalyzer(
-        sample_rate=getattr(transport, "_sample_rate", 8000),
-        params=VADParams(
-            confidence=SETTINGS.vad_threshold,
-            stop_secs=SETTINGS.vad_min_silence_ms / 1000.0,
-        ),
-    )
-    vad_processor = VADFrameProcessor(vad_analyzer)
+    # VAD is now handled by the transport's VADAnalyzer parameter
     
     # ──────────────────────────────────────────────────────────────────────────
     # Audio Recording Buffer (optional)
@@ -206,24 +197,24 @@ async def create_bot_pipeline(
     # ──────────────────────────────────────────────────────────────────────────
     
     # The pipeline flows:
-    # Input -> [AudioBuffer] -> VAD -> STT -> Context(user) -> LLM -> TTS -> Output -> Context(assistant)
+    # Input -> [AudioBuffer] -> STT -> Context(user) -> LLM -> TTS -> Output -> Context(assistant)
+    # Note: VAD is now handled by the transport's VADAnalyzer
     
     # Build pipeline with conditional audio buffer
     pipeline_processors = [
-        transport.input_processor(),     # Receive audio from Twilio
+        transport.input(),                # Receive audio from Twilio (via WebSocket)
     ]
     
     if audio_buffer:
-        pipeline_processors.append(audio_buffer)  # Capture audio before VAD
+        pipeline_processors.append(audio_buffer)  # Capture audio before STT
     
     pipeline_processors.extend([
-        vad_processor,                   # Voice activity detection (adapter)
         stt,                             # Speech-to-text
         idle_handler,                    # User inactivity detection
         context_aggregator.user(),       # Add user message to context
         llm,                             # LLM processing (with function calling)
         tts,                             # Text-to-speech
-        transport.output_processor(),    # Send audio to Twilio
+        transport.output(),              # Send audio to Twilio (via WebSocket)
         context_aggregator.assistant(),  # Add assistant response to context
     ])
 
@@ -237,6 +228,8 @@ async def create_bot_pipeline(
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
+            audio_in_sample_rate=8000,    # Twilio uses 8kHz
+            audio_out_sample_rate=8000,   # Twilio uses 8kHz
             enable_metrics=SETTINGS.enable_metrics,
             enable_usage_metrics=SETTINGS.enable_usage_metrics,
         ),
@@ -285,7 +278,51 @@ async def run_bot(
     )
     
     try:
-        await task.run()
+        runner = PipelineRunner(handle_sigint=False)
+        
+        # Import frame types
+        from pipecat.frames.frames import LLMRunFrame, OutputAudioRawFrame
+        
+        # Play pre-recorded greeting immediately (client is already connected)
+        greeting_played = False
+        if SETTINGS.greeting_audio_enabled:
+            try:
+                from .services.pre_recorded import get_clip_frames
+                frames = get_clip_frames(SETTINGS.greeting_audio_clip)
+                
+                if frames:
+                    logger.info(
+                        "Queueing pre-recorded greeting: %d frames (~%.1fs)",
+                        len(frames), len(frames) * 0.02  # 20ms per frame
+                    )
+                    # Queue audio frames to be sent when pipeline starts
+                    audio_frames = [
+                        OutputAudioRawFrame(
+                            audio=audio_data,
+                            sample_rate=8000,
+                            num_channels=1,
+                        )
+                        for audio_data in frames
+                    ]
+                    await task.queue_frames(audio_frames)
+                    greeting_played = True
+                    
+            except Exception as e:
+                logger.warning("Failed to load pre-recorded greeting: %s", e)
+        
+        # If no pre-recorded greeting, trigger LLM greeting
+        if not greeting_played:
+            logger.info("Triggering LLM greeting")
+            await task.queue_frames([LLMRunFrame()])
+        
+        # Register disconnect handler
+        @transport.event_handler("on_client_disconnected")
+        async def on_client_disconnected(transport, client):
+            logger.info("Client disconnected")
+            await task.cancel()
+        
+        # Just run the pipeline - FastAPIWebsocketTransport handles WebSocket internally
+        await runner.run(task)
     except asyncio.CancelledError:
         logger.info("Bot pipeline cancelled for call_sid=%s", call_sid)
     except Exception as e:

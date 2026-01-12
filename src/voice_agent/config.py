@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # ──────────────────────────────────────────────────────────────────────────
     # VAD (Silero) Configuration
     # ──────────────────────────────────────────────────────────────────────────
-    vad_threshold: float = Field(0.5, alias="VAD_SILERO_THRESHOLD")
+    vad_threshold: float = Field(0.4, alias="VAD_SILERO_THRESHOLD")
     vad_min_silence_ms: int = Field(120, alias="VAD_SILERO_MIN_SILENCE_MS")
     
     # ──────────────────────────────────────────────────────────────────────────
@@ -78,6 +78,18 @@ class Settings(BaseSettings):
     voicemail_detection_timeout: int = Field(5, alias="VOICEMAIL_DETECTION_TIMEOUT")
     voicemail_speech_threshold: int = Field(2500, alias="VOICEMAIL_SPEECH_THRESHOLD")
     voicemail_message_file: str = Field("VOICEMAIL_PROMPT.md", alias="VOICEMAIL_MESSAGE_FILE")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # Greeting Audio Configuration
+    # ──────────────────────────────────────────────────────────────────────────
+    greeting_audio_enabled: bool = Field(True, alias="GREETING_AUDIO_ENABLED")
+    greeting_audio_clip: str = Field("greetings", alias="GREETING_AUDIO_CLIP")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # Silence Fill Configuration
+    # ──────────────────────────────────────────────────────────────────────────
+    silence_fill_enabled: bool = Field(False, alias="ENABLE_SILENCE_FILL")
+    silence_fill_audio_clip: str = Field("random_silence_filling", alias="SILENCE_FILL_AUDIO_CLIP")
     
     # ──────────────────────────────────────────────────────────────────────────
     # Pipeline Settings

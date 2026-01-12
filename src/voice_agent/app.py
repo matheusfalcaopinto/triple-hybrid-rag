@@ -28,6 +28,7 @@ logging.basicConfig(
     level=getattr(logging, SETTINGS.log_level.upper(), logging.INFO),
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
+logging.getLogger("pipecat").setLevel(logging.DEBUG)
 logger = logging.getLogger("voice_agent_pipecat.app")
 
 from contextlib import asynccontextmanager
@@ -358,19 +359,46 @@ async def media_stream(ws: WebSocket) -> None:
     session = await state.add_session(call_sid, caller_phone, trace_id)
     
     try:
-        # Import here to avoid circular imports and allow lazy loading
-        from .transports.twilio_transport import TwilioWebsocketTransport, TwilioTransportParams
+        # Use Pipecat's utility to parse initial Twilio messages
+        from pipecat.runner.utils import parse_telephony_websocket
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
+        from pipecat.serializers.twilio import TwilioFrameSerializer
+        from pipecat.transports.websocket.fastapi import (
+            FastAPIWebsocketParams,
+            FastAPIWebsocketTransport,
+        )
         from .bot import run_bot
         
-        # Create transport for this WebSocket
-        transport_params = TwilioTransportParams(
-            sample_rate=SETTINGS.twilio_sample_rate,
-            enable_interruptions=True,
+        # parse_telephony_websocket reads the initial Twilio messages
+        # and returns stream_id, call_id from the "start" event
+        _, call_data = await parse_telephony_websocket(ws)
+        
+        stream_sid = call_data.get("stream_id", "")
+        twilio_call_sid = call_data.get("call_id", call_sid)
+        
+        logger.info(
+            "Twilio stream parsed: stream_sid=%s, call_sid=%s",
+            stream_sid, twilio_call_sid,
         )
-        transport = TwilioWebsocketTransport(
-            ws,
-            sample_rate=SETTINGS.twilio_sample_rate,
-            params=transport_params,
+        
+        # Create Twilio serializer
+        serializer = TwilioFrameSerializer(
+            stream_sid=stream_sid,
+            call_sid=twilio_call_sid,
+            account_sid=SETTINGS.twilio_account_sid,
+            auth_token=SETTINGS.twilio_auth_token,
+        )
+        
+        # Create transport with Pipecat's official FastAPIWebsocketTransport
+        transport = FastAPIWebsocketTransport(
+            websocket=ws,
+            params=FastAPIWebsocketParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                add_wav_header=False,
+                vad_analyzer=SileroVADAnalyzer(),
+                serializer=serializer,
+            ),
         )
         
         # Run the bot pipeline

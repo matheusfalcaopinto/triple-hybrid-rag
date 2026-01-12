@@ -396,7 +396,11 @@ class TwilioInputProcessor(FrameProcessor):
         """Run the input processor - yield frames from the queue."""
         while True:
             frame = await self._queue.get()
-            await self.push_frame_to_pipeline(frame, FrameDirection.DOWNSTREAM)
+            # Set _started flag when we see StartFrame - required by FrameProcessor
+            if isinstance(frame, StartFrame):
+                self._started = True
+            # Use inherited push_frame from FrameProcessor base class
+            await super().push_frame(frame, FrameDirection.DOWNSTREAM)
             if isinstance(frame, EndFrame):
                 break
 
