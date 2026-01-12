@@ -26,9 +26,12 @@ def main() -> None:
         env_path = repo_root / ".env"
         load_dotenv(dotenv_path=str(env_path), override=False)
     
-    # Add repo to path
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
+    # Add repo to path (prefer local src over installed package)
+    src_path = repo_root / "src"
+    for path in (src_path, repo_root):
+        path_str = str(path)
+        if path_str not in sys.path:
+            sys.path.insert(0, path_str)
     
     # Parse args
     parser = argparse.ArgumentParser(description="Run Pipecat voice agent locally")
@@ -41,7 +44,7 @@ def main() -> None:
     import uvicorn
     
     uvicorn.run(
-        "voice_agent_pipecat.app:app",
+        "voice_agent.app:app",
         host=args.host,
         port=args.port,
         reload=args.reload,

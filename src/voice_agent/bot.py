@@ -17,12 +17,16 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 try:
     from pipecat.audio.buffer import AudioBufferProcessor
     AUDIO_BUFFER_AVAILABLE = True
 except ImportError:
     AUDIO_BUFFER_AVAILABLE = False
     AudioBufferProcessor = None
+
+from .processors.vad_frame_processor import VADFrameProcessor
+
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import (
@@ -156,12 +160,14 @@ async def create_bot_pipeline(
     # VAD (Voice Activity Detection)
     # ──────────────────────────────────────────────────────────────────────────
     
-    vad = SileroVADAnalyzer(
-        params=SileroVADAnalyzer.VADParams(
-            threshold=SETTINGS.vad_threshold,
-            min_silence_duration_ms=SETTINGS.vad_min_silence_ms,
-        )
+    vad_analyzer = SileroVADAnalyzer(
+        sample_rate=getattr(transport, "_sample_rate", 8000),
+        params=VADParams(
+            confidence=SETTINGS.vad_threshold,
+            stop_secs=SETTINGS.vad_min_silence_ms / 1000.0,
+        ),
     )
+    vad_processor = VADFrameProcessor(vad_analyzer)
     
     # ──────────────────────────────────────────────────────────────────────────
     # Audio Recording Buffer (optional)
@@ -211,7 +217,7 @@ async def create_bot_pipeline(
         pipeline_processors.append(audio_buffer)  # Capture audio before VAD
     
     pipeline_processors.extend([
-        vad,                             # Voice activity detection
+        vad_processor,                   # Voice activity detection (adapter)
         stt,                             # Speech-to-text
         idle_handler,                    # User inactivity detection
         context_aggregator.user(),       # Add user message to context
@@ -220,6 +226,7 @@ async def create_bot_pipeline(
         transport.output_processor(),    # Send audio to Twilio
         context_aggregator.assistant(),  # Add assistant response to context
     ])
+
     
     pipeline = Pipeline(pipeline_processors)
     

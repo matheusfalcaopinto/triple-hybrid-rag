@@ -39,6 +39,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.base_transport import TransportParams
+from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADState
 
 logger = logging.getLogger("voice_agent_pipecat.transports.twilio")
 

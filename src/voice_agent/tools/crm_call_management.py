@@ -11,23 +11,27 @@ def end_call(reason: str = "conversation_ended") -> Dict[str, Any]:
     after the current response is finished.
     """
     try:
-        # Access the shared context var from the adapter
-        # This is an internal implementation detail of how we bridge the LLM <-> Actor
-        from voice_agent.providers.openai_adapter import _get_call_context
-        
+        # Access the shared context var from the adapter (optional in text-only chat)
+        try:
+            from voice_agent.providers.openai_adapter import _get_call_context  # type: ignore
+        except ImportError:
+            logger.warning("Call context adapter missing; ending conversation best-effort")
+            return {
+                "success": True,
+                "status": "ending_call",
+                "message": "Ending conversation (no call context available).",
+            }
+
         ctx = _get_call_context()
         if ctx is not None:
             ctx["should_hangup"] = True
             ctx["hangup_reason"] = reason
             logger.info("Signal to end call received: reason=%s", reason)
             return {"success": True, "status": "ending_call", "message": "Call will end after this response."}
-        else:
-            logger.warning("Attempted to end call but no active call context found")
-            return {"success": False, "error": "No active call context found"}
+
+        logger.warning("Attempted to end call but no active call context found")
+        return {"success": False, "error": "No active call context found"}
             
-    except ImportError:
-        logger.error("Could not import openai_adapter to access call context")
-        return {"success": False, "error": "Internal error: Context access failed"}
     except Exception as e:
         logger.error("Failed to signal end call: %s", e)
         return {"success": False, "error": str(e)}
