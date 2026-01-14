@@ -36,6 +36,22 @@ dev = [
     "httpx>=0.26.0",
 ]
 
+rag = [
+    # Document processing
+    "PyMuPDF>=1.24.0",       # PDF loading (fitz)
+    "pypdf>=4.0.0",          # PDF fallback
+    "python-docx>=1.1.0",    # DOCX loading
+    "openpyxl>=3.1.0",       # XLSX loading
+    # ML models
+    "sentence-transformers>=3.0.0",  # Cross-encoder reranking
+    "sentencepiece>=0.2.0",  # Required for SigLIP tokenizer
+    "torch>=2.0.0",          # PyTorch for embeddings
+    "transformers>=4.40.0",  # SigLIP image embeddings
+    # Utilities
+    "numpy>=1.26.0",         # Vector operations
+    "Pillow>=10.0.0",        # Image processing
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import JSONResponse, Response
 
 from .config import SETTINGS
+from .observability.rag_metrics import rag_metrics
 
 # Configure logging
 logging.basicConfig(
@@ -328,6 +329,12 @@ def metrics() -> Response:
         "# TYPE voice_agent_is_draining gauge",
         f"voice_agent_is_draining {1 if state.is_draining else 0}",
     ]
+    
+    # Add RAG metrics
+    rag_lines = rag_metrics.export_prometheus()
+    if rag_lines:
+        lines.append("")
+        lines.extend(rag_lines.strip().split("\n"))
     
     return Response(
         content="\n".join(lines) + "\n",

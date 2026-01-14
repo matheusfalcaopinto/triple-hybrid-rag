@@ -18,6 +18,7 @@ from control_plane.api.routers import (
     ingest,
     integrations,
     leads,
+    rag,
     reports,
     runtimes,
     users,
@@ -104,6 +105,7 @@ def create_app() -> FastAPI:
     api_v1_router.include_router(integrations.router, tags=["integrations"])
     api_v1_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
     api_v1_router.include_router(ingest.router, prefix="/ingest", tags=["ingest"])
+    api_v1_router.include_router(rag.router, prefix="/rag", tags=["rag"])
     api_v1_router.include_router(sse_router, prefix="/events", tags=["events"])
     
     # Include the API v1 router

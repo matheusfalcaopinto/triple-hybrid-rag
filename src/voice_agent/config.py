@@ -207,6 +207,76 @@ class Settings(BaseSettings):
     use_ai_summary_generation: bool = Field(True, alias="USE_AI_SUMMARY_GENERATION")
     
     # ──────────────────────────────────────────────────────────────────────────
+    # RAG Configuration - Embeddings (Local Qwen3-VL)
+    # ──────────────────────────────────────────────────────────────────────────
+    # Uses text-embedding-qwen3-vl-embedding-8b for text embeddings
+    # Model outputs 4096d but we truncate to 4000d for pgvector halfvec HNSW indexing
+    # Stored as halfvec(4000) for 50% storage savings with negligible quality loss
+    rag_embed_model: str = Field("text-embedding-qwen3-vl-embedding-8b", alias="RAG_EMBED_MODEL")
+    rag_vector_dim: int = Field(4000, alias="RAG_VECTOR_DIM")  # Truncated from 4096 for pgvector halfvec limit
+    rag_model_output_dim: int = Field(4096, alias="RAG_MODEL_OUTPUT_DIM")  # Actual model output
+    rag_embed_batch_size: int = Field(20, alias="RAG_EMBED_BATCH_SIZE")
+    rag_embed_api_base: str = Field("http://127.0.0.1:1234/v1", alias="RAG_EMBED_API_BASE")
+    rag_embed_use_local: bool = Field(True, alias="RAG_EMBED_USE_LOCAL")
+    rag_enable_image_embeddings: bool = Field(False, alias="RAG_ENABLE_IMAGE_EMBEDDINGS")
+    
+    # Legacy aliases for backward compatibility
+    @property
+    def rag_embed_model_text(self) -> str:
+        """Backward compatibility: text model is now unified."""
+        return self.rag_embed_model
+    
+    @property
+    def rag_embed_model_image(self) -> str:
+        """Backward compatibility: image model is now unified."""
+        return self.rag_embed_model
+    
+    @property
+    def rag_vector_dim_text(self) -> int:
+        """Backward compatibility: text dimension is now unified."""
+        return self.rag_vector_dim
+    
+    @property
+    def rag_vector_dim_image(self) -> int:
+        """Backward compatibility: image dimension is now unified."""
+        return self.rag_vector_dim
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG Configuration - Chunking
+    # ──────────────────────────────────────────────────────────────────────────
+    rag_chunk_size: int = Field(1000, alias="RAG_CHUNK_SIZE")
+    rag_chunk_overlap: int = Field(200, alias="RAG_CHUNK_OVERLAP")
+    rag_preserve_tables: bool = Field(True, alias="RAG_PRESERVE_TABLES")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG Configuration - Hybrid Search & Retrieval
+    # ──────────────────────────────────────────────────────────────────────────
+    rag_use_hybrid_bm25: bool = Field(True, alias="RAG_USE_HYBRID_BM25")
+    rag_top_k_retrieve: int = Field(50, alias="RAG_TOP_K_RETRIEVE")
+    rag_top_k_image: int = Field(3, alias="RAG_TOP_K_IMAGE")
+    rag_top_k_rerank: int = Field(5, alias="RAG_TOP_K_RERANK")
+    rag_reranking_enabled: bool = Field(True, alias="RAG_RERANKING_ENABLED")
+    rag_rerank_model: str = Field("qwen3-vl-reranker-8b", alias="RAG_RERANK_MODEL")
+    rag_rerank_api_base: str = Field("http://127.0.0.1:1234/v1", alias="RAG_RERANK_API_BASE")
+    rag_rerank_use_local: bool = Field(True, alias="RAG_RERANK_USE_LOCAL")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG Configuration - OCR
+    # ──────────────────────────────────────────────────────────────────────────
+    rag_ocr_mode: str = Field("base", alias="RAG_OCR_MODE")
+    rag_ocr_confidence_threshold: float = Field(0.6, alias="RAG_OCR_CONFIDENCE_THRESHOLD")
+    rag_ocr_retry_limit: int = Field(2, alias="RAG_OCR_RETRY_LIMIT")
+    rag_ocr_endpoint: str = Field("http://127.0.0.1:1234/v1", alias="RAG_OCR_ENDPOINT")
+    rag_ocr_model: str = Field("qwen/qwen3-vl-8b", alias="RAG_OCR_MODEL")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG Configuration - Deduplication & Processing
+    # ──────────────────────────────────────────────────────────────────────────
+    rag_dedup_enabled: bool = Field(True, alias="RAG_DEDUP_ENABLED")
+    rag_max_workers: int = Field(4, alias="RAG_MAX_WORKERS")
+    rag_fts_language: str = Field("portuguese", alias="RAG_FTS_LANGUAGE")
+    
+    # ──────────────────────────────────────────────────────────────────────────
     # Derived Properties
     # ──────────────────────────────────────────────────────────────────────────
     @property

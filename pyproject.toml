@@ -41,6 +41,20 @@ dependencies = [
 # WebRTC support for WhatsApp Calling (Meta Business API)
 webrtc = ["aiortc>=1.9.0", "aioice>=0.9.0", "av>=12.0.0"]
 
+# RAG support for document ingestion and hybrid search
+rag = [
+    "PyMuPDF>=1.24.0",       # PDF loading (fitz)
+    "pypdf>=4.0.0",          # PDF fallback
+    "python-docx>=1.1.0",    # DOCX loading
+    "openpyxl>=3.1.0",       # XLSX loading
+    "sentence-transformers>=2.5.0",  # Cross-encoder reranking
+    "sentencepiece>=0.2.0",  # Required for SigLIP tokenizer
+    "torch>=2.2.0",          # PyTorch for embeddings
+    "transformers>=4.40.0",  # SigLIP image embeddings
+    "numpy>=1.26.0",         # Vector operations
+    "Pillow>=10.0.0",        # Image processing
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",

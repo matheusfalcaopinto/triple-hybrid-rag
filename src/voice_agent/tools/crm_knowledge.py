@@ -2,97 +2,201 @@
 CRM Knowledge Base Tools
 
 Provides tools for searching and managing company knowledge base in Supabase.
-Uses Supabase text search or vector search (if enabled) for retrieval.
+Uses hybrid search (BM25 + vector) with optional reranking for retrieval.
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+from voice_agent.config import SETTINGS
 from voice_agent.utils.db import get_supabase_client
 
 
 logger = logging.getLogger(__name__)
 
 
-# Tool implementations
+# ──────────────────────────────────────────────────────────────────────────────
+# Hybrid Search Implementation
+# ──────────────────────────────────────────────────────────────────────────────
 
 def search_knowledge_base(
     query: str,
     category: Optional[str] = None,
     limit: int = 5,
+    use_hybrid: bool = True,
 ) -> Dict[str, Any]:
     """
-    Search the knowledge base.
+    Search the knowledge base using hybrid search (BM25 + vector).
     
     Args:
         query: Search query (what the customer is asking about)
         category: Filter by category (pricing, technical, faq, product, etc.) (optional)
         limit: Maximum number of results to return (default 5)
+        use_hybrid: Whether to use hybrid search (default True)
         
     Returns:
-        List of relevant knowledge base entries with ranking
+        List of relevant knowledge base entries with ranking and provenance
     """
     try:
-        supabase = get_supabase_client()
-        
-        # Use textSearch on content. 
-        # Note: This uses 'english' config by default in Supabase client usually.
-        # If we need multi-language, we might need to be more specific or use ilike.
-        # For now, we try textSearch on 'content' OR 'title'.
-        # Supabase client 'or' with textSearch is tricky.
-        # We will use a simple ilike for broad matching if textSearch is too strict,
-        # but textSearch is better for "keywords".
-        # Let's use 'ilike' for now to ensure we match partial words easily without FTS config issues.
-        # "title.ilike.%query%,content.ilike.%query%"
-        
-        search_filter = f"title.ilike.%{query}%,content.ilike.%{query}%,keywords.ilike.%{query}%"
-        
-        db_query = supabase.table("knowledge_base").select(
-            "id, category, title, content, keywords, source_document, created_at, updated_at, access_count"
-        ).or_(search_filter)
-        
-        if category:
-            db_query = db_query.eq("category", category)
-            
-        # Order by access_count desc as a proxy for relevance if we don't have FTS rank
-        response = db_query.order("access_count", desc=True).limit(limit).execute()
-        
-        results = []
-        for row in response.data:
-            # Increment access count (async or fire-and-forget ideally, but here sync)
-            # We do it in a separate call to not block the read? 
-            # Actually, we can just fire it and ignore result, or skip it for speed.
-            # Let's skip incrementing for now to save latency, or do it.
-            # supabase.table("knowledge_base").update({"access_count": row["access_count"] + 1}).eq("id", row["id"]).execute()
-            
-            results.append({
-                "kb_id": row["id"],
-                "category": row["category"],
-                "title": row["title"],
-                "content": row["content"],
-                "keywords": row["keywords"],
-                "source_document": row["source_document"],
-                "access_count": row["access_count"],
-                "relevance_rank": 0, # No rank with ilike
-            })
-        
-        return {
-            "success": True,
-            "query": query,
-            "category": category,
-            "result_count": len(results),
-            "results": results,
-        }
-        
+        # Try new chunk-based hybrid search first
+        if use_hybrid and SETTINGS.rag_use_hybrid_bm25:
+            return _search_knowledge_base_hybrid(query, category, limit)
+        else:
+            return _search_knowledge_base_legacy(query, category, limit)
     except Exception as e:
         logger.error(f"Error searching knowledge base: {e}")
-        return {
-            "error": f"Database error: {str(e)}",
-            "query": query,
-            "category": category,
-        }
+        # Fallback to legacy search
+        try:
+            return _search_knowledge_base_legacy(query, category, limit)
+        except Exception as e2:
+            return {
+                "error": f"Database error: {str(e2)}",
+                "query": query,
+                "category": category,
+            }
+
+
+def _search_knowledge_base_hybrid(
+    query: str,
+    category: Optional[str] = None,
+    limit: int = 5,
+    org_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Hybrid search using knowledge_base_chunks with BM25 + vector + reranking.
+    """
+    from voice_agent.retrieval.hybrid_search import HybridSearcher, SearchConfig
+    from voice_agent.retrieval.reranker import Reranker, LightweightReranker
+    
+    supabase = get_supabase_client()
+    
+    # Get org_id from parameter or find one with chunks
+    if not org_id:
+        # First, try to find an org that has knowledge base chunks
+        chunk_check = supabase.table("knowledge_base_chunks").select("org_id").limit(1).execute()
+        if chunk_check.data:
+            org_id = str(chunk_check.data[0]["org_id"])
+            logger.debug(f"Using org_id from existing chunks: {org_id}")
+        else:
+            # Fall back to first org
+            org_response = supabase.table("organizations").select("id").limit(1).execute()
+            if not org_response.data:
+                logger.warning("No organization found, falling back to legacy search")
+                return _search_knowledge_base_legacy(query, category, limit)
+            org_id = str(org_response.data[0]["id"])
+    
+    # Configure search
+    config = SearchConfig.from_settings()
+    config.top_k_final = limit * 2  # Get more for reranking
+    
+    # Create searcher
+    searcher = HybridSearcher(org_id=str(org_id), config=config)
+    
+    # Run async search synchronously
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    search_results = loop.run_until_complete(
+        searcher.search(query, top_k=limit * 2, category=category)
+    )
+    
+    # Rerank if enabled
+    if SETTINGS.rag_reranking_enabled and search_results:
+        try:
+            reranker = Reranker()
+            search_results = loop.run_until_complete(
+                reranker.rerank(query, search_results, top_k=limit)
+            )
+        except Exception as e:
+            logger.warning(f"Reranking failed, using lightweight fallback: {e}")
+            reranker = LightweightReranker(top_k=limit)
+            search_results = loop.run_until_complete(
+                reranker.rerank(query, search_results, top_k=limit)
+            )
+    else:
+        search_results = search_results[:limit]
+    
+    # Format results with provenance
+    results = []
+    for i, result in enumerate(search_results):
+        results.append({
+            "chunk_id": result.chunk_id,
+            "category": result.category,
+            "title": result.title,
+            "content": result.content,
+            "source_document": result.source_document,
+            "page": result.page,
+            "chunk_index": result.chunk_index,
+            "modality": result.modality,
+            "relevance_rank": i + 1,
+            "similarity_score": round(result.similarity_score, 4) if result.similarity_score else None,
+            "rerank_score": round(result.rerank_score, 4) if result.rerank_score else None,
+            "ocr_confidence": result.ocr_confidence,
+            "is_table": result.is_table,
+            "table_context": result.table_context,
+            "alt_text": result.alt_text,
+        })
+    
+    return {
+        "success": True,
+        "query": query,
+        "category": category,
+        "result_count": len(results),
+        "search_type": "hybrid",
+        "results": results,
+    }
+
+
+def _search_knowledge_base_legacy(
+    query: str,
+    category: Optional[str] = None,
+    limit: int = 5,
+) -> Dict[str, Any]:
+    """
+    Legacy search using original knowledge_base table with ILIKE.
+    """
+    supabase = get_supabase_client()
+    
+    # Use ILIKE for broad matching
+    search_filter = f"title.ilike.%{query}%,content.ilike.%{query}%,keywords.ilike.%{query}%"
+    
+    db_query = supabase.table("knowledge_base").select(
+        "id, category, title, content, keywords, source_document, created_at, updated_at, access_count"
+    ).or_(search_filter)
+    
+    if category:
+        db_query = db_query.eq("category", category)
+        
+    # Order by access_count desc as a proxy for relevance
+    response = db_query.order("access_count", desc=True).limit(limit).execute()
+    
+    results = []
+    for row in response.data:
+        results.append({
+            "kb_id": row["id"],
+            "category": row["category"],
+            "title": row["title"],
+            "content": row["content"],
+            "keywords": row["keywords"],
+            "source_document": row["source_document"],
+            "access_count": row["access_count"],
+            "relevance_rank": 0,
+        })
+    
+    return {
+        "success": True,
+        "query": query,
+        "category": category,
+        "result_count": len(results),
+        "search_type": "legacy",
+        "results": results,
+    }
 
 
 def get_knowledge_by_category(category: str, limit: int = 10) -> Dict[str, Any]:
@@ -393,13 +497,18 @@ TOOL_DEFINITIONS = [
     {
         "name": "search_knowledge_base",
         "description": (
-            "Search the knowledge base for answers to customer questions and "
-            "return the most relevant entries."
+            "Search the knowledge base for answers to customer questions using "
+            "hybrid search (semantic + keyword). Returns the most relevant entries "
+            "with provenance (source document, page number, confidence)."
         ),
         "parameters": {
             "query": {
                 "type": "string",
                 "description": "Search query describing the customer's question",
+            },
+            "category": {
+                "type": "string",
+                "description": "Filter by category (pricing, technical, faq, product, etc.)",
             },
             "limit": {
                 "type": "integer",
