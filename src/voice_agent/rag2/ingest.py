@@ -6,8 +6,9 @@ Orchestrates document ingestion into the RAG 2.0 schema:
 2. Text extraction (reuse existing loader/OCR)
 3. Hierarchical chunking (parent/child)
 4. Embedding generation (Matryoshka 4096→1024)
-5. Deduplication
-6. Database storage
+5. Entity extraction (NER + Relation Extraction)
+6. Deduplication
+7. Database storage
 """
 
 import asyncio
@@ -16,9 +17,10 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+from voice_agent.config import SETTINGS
 from voice_agent.ingestion.loader import DocumentLoader, LoadedDocument
 from voice_agent.ingestion.ocr import OCRProcessor
 from voice_agent.rag2.chunker import (
@@ -28,6 +30,12 @@ from voice_agent.rag2.chunker import (
     get_hierarchical_chunker,
 )
 from voice_agent.rag2.embedder import RAG2Embedder, get_rag2_embedder
+from voice_agent.rag2.entity_extraction import (
+    EntityExtractor,
+    EntityStore,
+    get_entity_extractor,
+    get_entity_store,
+)
 from voice_agent.utils.db import get_supabase_client
 
 logger = logging.getLogger(__name__)
@@ -47,6 +55,8 @@ class IngestStats:
     child_chunks_created: int = 0
     child_chunks_embedded: int = 0
     child_chunks_deduplicated: int = 0
+    entities_extracted: int = 0
+    relations_extracted: int = 0
     errors: List[str] = field(default_factory=list)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
@@ -75,6 +85,8 @@ class RAG2Ingestor:
     - rag_documents
     - rag_parent_chunks
     - rag_child_chunks
+    - rag_entities (via NER)
+    - rag_relations (via relation extraction)
     """
     
     def __init__(
@@ -85,7 +97,9 @@ class RAG2Ingestor:
         chunker: Optional[HierarchicalChunker] = None,
         embedder: Optional[RAG2Embedder] = None,
         ocr_processor: Optional[OCRProcessor] = None,
+        entity_extractor: Optional[EntityExtractor] = None,
         dedup_enabled: bool = True,
+        entity_extraction_enabled: Optional[bool] = None,
     ):
         """
         Initialize the RAG2 ingestor.
@@ -97,19 +111,32 @@ class RAG2Ingestor:
             chunker: Hierarchical chunker instance
             embedder: RAG2 embedder instance
             ocr_processor: OCR processor instance
+            entity_extractor: Entity extractor instance
             dedup_enabled: Whether to enable chunk-level deduplication
+            entity_extraction_enabled: Whether to run NER/RE (default from config)
         """
         self.org_id = org_id
         self.collection = collection
         self.dedup_enabled = dedup_enabled
+        
+        # Entity extraction config
+        self.entity_extraction_enabled = (
+            entity_extraction_enabled
+            if entity_extraction_enabled is not None
+            else getattr(SETTINGS, 'rag2_entity_extraction_enabled', True)
+        )
         
         # Initialize components
         self.loader = loader or DocumentLoader()
         self.chunker = chunker or get_hierarchical_chunker()
         self.embedder = embedder or get_rag2_embedder()
         self.ocr_processor = ocr_processor or OCRProcessor()
+        self.entity_extractor = entity_extractor or (
+            get_entity_extractor() if self.entity_extraction_enabled else None
+        )
         
         self._supabase = None
+        self._entity_store: Optional[EntityStore] = None
     
     @property
     def supabase(self) -> Any:
@@ -117,6 +144,13 @@ class RAG2Ingestor:
         if self._supabase is None:
             self._supabase = get_supabase_client()
         return self._supabase
+    
+    @property
+    def entity_store(self) -> EntityStore:
+        """Lazy-load entity store."""
+        if self._entity_store is None:
+            self._entity_store = get_entity_store(self.supabase)
+        return self._entity_store
     
     def _compute_file_hash(self, file_path: Path) -> str:
         """Compute SHA-256 hash of file contents."""
@@ -195,7 +229,7 @@ class RAG2Ingestor:
             stats.documents_registered = 1
             
             if progress_callback:
-                progress_callback("loading", 2, 6)
+                progress_callback("loading", 2, 7)
             
             # Step 4: Load document content
             loaded_doc = await self._load_document(path)
@@ -205,7 +239,7 @@ class RAG2Ingestor:
             source_pages = self._build_page_map(loaded_doc)
             
             if progress_callback:
-                progress_callback("chunking", 3, 6)
+                progress_callback("chunking", 3, 7)
             
             # Step 5: Create hierarchical chunks
             parents = self.chunker.chunk_document(
@@ -217,32 +251,47 @@ class RAG2Ingestor:
             stats.parent_chunks_created = len(parents)
             
             if progress_callback:
-                progress_callback("embedding", 4, 6)
+                progress_callback("embedding", 4, 7)
             
             # Step 6: Embed and store chunks
-            await self._store_chunks(
+            stored_parents = await self._store_chunks(
                 doc_id=doc_id,
                 parents=parents,
                 stats=stats,
             )
             
-            if progress_callback:
-                progress_callback("finalizing", 5, 6)
+            # Step 7: Entity extraction (if enabled)
+            if self.entity_extraction_enabled and self.entity_extractor:
+                if progress_callback:
+                    progress_callback("extracting_entities", 5, 7)
+                
+                await self._extract_entities(
+                    doc_id=doc_id,
+                    title=title,
+                    parents=parents,
+                    stored_parents=stored_parents,
+                    stats=stats,
+                )
             
-            # Step 7: Update document status
+            if progress_callback:
+                progress_callback("finalizing", 6, 7)
+            
+            # Step 8: Update document status
             self.supabase.table("rag_documents").update({
                 "ingestion_status": "completed",
             }).eq("id", doc_id).execute()
             
             if progress_callback:
-                progress_callback("complete", 6, 6)
+                progress_callback("complete", 7, 7)
             
             stats.end_time = _utcnow()
             
             logger.info(
                 f"Ingested {path.name}: {stats.parent_chunks_created} parents, "
                 f"{stats.child_chunks_created} children, "
-                f"{stats.child_chunks_deduplicated} deduped"
+                f"{stats.child_chunks_deduplicated} deduped, "
+                f"{stats.entities_extracted} entities, "
+                f"{stats.relations_extracted} relations"
             )
             
             return IngestResult(
@@ -304,8 +353,14 @@ class RAG2Ingestor:
         doc_id: str,
         parents: List[ParentChunk],
         stats: IngestStats,
-    ) -> None:
-        """Store parent and child chunks in database."""
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Store parent and child chunks in database.
+        
+        Returns:
+            Dict mapping parent.id to {db_id, child_ids} for entity extraction
+        """
+        stored_parents: Dict[str, Dict[str, Any]] = {}
         
         # Collect all child texts for batch embedding
         all_children: List[Tuple[ParentChunk, ChildChunk]] = []
@@ -345,6 +400,12 @@ class RAG2Ingestor:
             result = self.supabase.table("rag_parent_chunks").insert(parent_data).execute()
             db_parent_id = result.data[0]["id"]
             
+            # Track for entity extraction
+            stored_parents[parent.id] = {
+                "db_id": db_parent_id,
+                "child_ids": [],
+            }
+            
             # Store child chunks for this parent
             for i, (p, child) in enumerate(all_children):
                 if p.id != parent.id:
@@ -378,7 +439,9 @@ class RAG2Ingestor:
                 }
                 
                 try:
-                    self.supabase.table("rag_child_chunks").insert(child_data).execute()
+                    result = self.supabase.table("rag_child_chunks").insert(child_data).execute()
+                    child_db_id = result.data[0]["id"]
+                    stored_parents[p.id]["child_ids"].append(child_db_id)
                     stats.child_chunks_created += 1
                     stats.child_chunks_embedded += 1
                 except Exception as e:
@@ -387,6 +450,71 @@ class RAG2Ingestor:
                         stats.child_chunks_deduplicated += 1
                     else:
                         raise
+        
+        return stored_parents
+    
+    async def _extract_entities(
+        self,
+        doc_id: str,
+        title: str,
+        parents: List[ParentChunk],
+        stored_parents: Dict[str, Dict[str, Any]],
+        stats: IngestStats,
+    ) -> None:
+        """
+        Extract entities and relations from parent chunks.
+        
+        Uses GPT-5 to perform NER and relation extraction, storing results
+        in rag_entities and rag_relations tables.
+        """
+        if not self.entity_extractor:
+            return
+        
+        logger.info(f"Extracting entities from {len(parents)} parent chunks...")
+        
+        # Extract from each parent chunk
+        for parent in parents:
+            try:
+                # Get stored parent info
+                parent_info = stored_parents.get(parent.id)
+                if not parent_info:
+                    continue
+                
+                db_parent_id = parent_info["db_id"]
+                child_ids = parent_info["child_ids"]
+                
+                # Extract entities and relations
+                result = await self.entity_extractor.extract(
+                    text=parent.text,
+                    context=parent.section_heading,
+                    document_title=title,
+                )
+                
+                if result.errors:
+                    for error in result.errors:
+                        stats.errors.append(f"Entity extraction: {error}")
+                    continue
+                
+                # Store extracted data
+                store_stats = await self.entity_store.store_extraction(
+                    result=result,
+                    org_id=self.org_id,
+                    document_id=doc_id,
+                    parent_chunk_id=db_parent_id,
+                    child_chunk_ids=child_ids,
+                )
+                
+                stats.entities_extracted += store_stats["entities_created"]
+                stats.relations_extracted += store_stats["relations_created"]
+                
+            except Exception as e:
+                logger.warning(f"Entity extraction failed for parent {parent.id}: {e}")
+                stats.errors.append(f"Entity extraction error: {e}")
+        
+        logger.info(
+            f"Extracted {stats.entities_extracted} entities, "
+            f"{stats.relations_extracted} relations"
+        )
 
 
 async def ingest_file(

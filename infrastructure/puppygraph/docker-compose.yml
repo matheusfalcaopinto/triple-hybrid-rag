@@ -1,0 +1,64 @@
+version: '3.8'
+
+# =============================================================================
+# PuppyGraph Infrastructure for RAG 2.0 Knowledge Graph
+#
+# Provides Cypher query interface over PostgreSQL tables:
+# - rag_entities (graph nodes)
+# - rag_relations (graph edges)
+# - rag_entity_mentions (entity-chunk links)
+# =============================================================================
+
+services:
+  puppygraph:
+    image: puppygraph/puppygraph:latest
+    container_name: puppygraph
+    hostname: puppygraph
+    ports:
+      - "8182:8182"      # Gremlin/Cypher API
+      - "8081:8081"      # Web UI
+      - "7687:7687"      # Bolt protocol (Neo4j compatible)
+    environment:
+      # PuppyGraph configuration
+      PUPPYGRAPH_USERNAME: ${PUPPYGRAPH_USERNAME:-admin}
+      PUPPYGRAPH_PASSWORD: ${PUPPYGRAPH_PASSWORD:-puppygraph123}
+      
+      # PostgreSQL connection (Supabase)
+      PUPPYGRAPH_DATASOURCE_TYPE: postgresql
+      PUPPYGRAPH_DATASOURCE_HOST: ${SUPABASE_DB_HOST:-host.docker.internal}
+      PUPPYGRAPH_DATASOURCE_PORT: ${SUPABASE_DB_PORT:-54322}
+      PUPPYGRAPH_DATASOURCE_DATABASE: ${SUPABASE_DB_NAME:-postgres}
+      PUPPYGRAPH_DATASOURCE_USERNAME: ${SUPABASE_DB_USER:-postgres}
+      PUPPYGRAPH_DATASOURCE_PASSWORD: ${SUPABASE_DB_PASSWORD:-postgres}
+      
+      # Schema configuration
+      PUPPYGRAPH_SCHEMA_FILE: /config/schema.json
+      
+      # Memory settings
+      JAVA_OPTS: "-Xms512m -Xmx2g"
+      
+    volumes:
+      - ./schema.json:/config/schema.json:ro
+      - puppygraph-data:/var/lib/puppygraph
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    
+    restart: unless-stopped
+    
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    driver: bridge
+    # Connect to existing supabase network if available
+    external: false
+
+volumes:
+  puppygraph-data:
+    driver: local

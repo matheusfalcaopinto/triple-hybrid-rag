@@ -15,6 +15,7 @@ from voice_agent.rag2.chunker import (
     ChunkModality,
     HierarchicalChunker,
     ParentChunk,
+    RecursiveCharacterTextSplitter,
     get_hierarchical_chunker,
 )
 from voice_agent.rag2.embedder import (
@@ -23,6 +24,15 @@ from voice_agent.rag2.embedder import (
     get_rag2_embedder,
     normalize_l2,
     truncate_matryoshka,
+)
+from voice_agent.rag2.entity_extraction import (
+    EntityExtractor,
+    EntityStore,
+    ExtractedEntity,
+    ExtractedRelation,
+    ExtractionResult,
+    get_entity_extractor,
+    get_entity_store,
 )
 from voice_agent.rag2.graph_search import (
     GraphEdge,
@@ -58,6 +68,7 @@ __all__ = [
     "truncate_matryoshka",
     # Chunker
     "HierarchicalChunker",
+    "RecursiveCharacterTextSplitter",
     "ParentChunk",
     "ChildChunk",
     "ChunkModality",
@@ -68,6 +79,14 @@ __all__ = [
     "GraphNode",
     "GraphEdge",
     "get_graph_searcher",
+    # Entity Extraction
+    "EntityExtractor",
+    "EntityStore",
+    "ExtractedEntity",
+    "ExtractedRelation",
+    "ExtractionResult",
+    "get_entity_extractor",
+    "get_entity_store",
     # Ingestion
     "RAG2Ingestor",
     "IngestResult",

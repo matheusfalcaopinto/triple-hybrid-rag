@@ -4,6 +4,7 @@ OCR Processing Module
 Handles optical character recognition for scanned documents and images:
 - Qwen3-VL Vision API integration (OpenAI-compatible)
 - DeepSeek OCR integration (legacy fallback)
+- **Gundam Tiling**: Overlapping tile strategy for high-resolution documents
 - Confidence tracking
 - Retry logic with fallback modes
 - Table detection and preservation
@@ -12,9 +13,10 @@ Handles optical character recognition for scanned documents and images:
 import asyncio
 import base64
 import logging
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -33,7 +35,31 @@ class OCRMode(Enum):
     SMALL = "small"
     BASE = "base"
     LARGE = "large"
-    GUNDAM = "gundam"  # Highest quality
+    GUNDAM = "gundam"  # Highest quality - uses Gundam Tiling
+
+
+@dataclass
+class GundamTilingConfig:
+    """
+    Configuration for Gundam Tiling OCR strategy.
+    
+    Gundam Tiling splits large images into overlapping tiles,
+    processes each tile separately, then intelligently merges
+    the results using fuzzy matching to handle overlapping text.
+    
+    This dramatically improves OCR accuracy for:
+    - High-resolution scanned documents (>2000px)
+    - Dense text layouts
+    - Tables and structured data
+    - Multi-column documents
+    """
+    enabled: bool = True
+    tile_size: int = 1024  # Tile dimensions in pixels
+    overlap: int = 128  # Overlap between adjacent tiles (px)
+    min_image_size: int = 1500  # Only tile images larger than this
+    max_tiles: int = 16  # Maximum tiles per image to prevent explosion
+    merge_strategy: str = "fuzzy"  # "fuzzy", "concat", or "vote"
+    fuzzy_threshold: float = 0.85  # Similarity threshold for fuzzy merge
 
 
 @dataclass
@@ -46,7 +72,10 @@ class OCRResult:
     mode_used: str
     error: Optional[str] = None
     retry_count: int = 0
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = field(default_factory=dict)
+    # Gundam Tiling metadata
+    tiles_processed: int = 0
+    tile_confidences: List[float] = field(default_factory=list)
     
     def __post_init__(self):
         if self.metadata is None:
@@ -59,6 +88,11 @@ class OCRProcessor:
     
     Uses DeepSeek OCR with configurable modes and retry logic.
     Falls back to higher quality modes if confidence is low.
+    
+    Gundam Mode:
+        When mode="gundam" or for images > min_image_size pixels,
+        uses Gundam Tiling to split large images into overlapping tiles,
+        process each tile, and merge results with fuzzy matching.
     """
     
     def __init__(
@@ -69,6 +103,7 @@ class OCRProcessor:
         endpoint: Optional[str] = None,
         model: Optional[str] = None,
         timeout: float = 60.0,
+        gundam_config: Optional[GundamTilingConfig] = None,
     ):
         """
         Initialize OCR processor.
@@ -80,6 +115,7 @@ class OCRProcessor:
             endpoint: DeepSeek OCR endpoint URL
             model: DeepSeek OCR model name
             timeout: Request timeout in seconds
+            gundam_config: Configuration for Gundam Tiling strategy
         """
         self.mode = mode or SETTINGS.rag_ocr_mode
         self.confidence_threshold = confidence_threshold or SETTINGS.rag_ocr_confidence_threshold
@@ -87,6 +123,9 @@ class OCRProcessor:
         self.endpoint = endpoint or SETTINGS.rag_ocr_endpoint
         self.model = model or SETTINGS.rag_ocr_model
         self.timeout = timeout
+        
+        # Gundam Tiling configuration
+        self.gundam_config = gundam_config or GundamTilingConfig()
         
         # Mode hierarchy for fallback
         self._mode_hierarchy = ["tiny", "small", "base", "large", "gundam"]
@@ -112,6 +151,15 @@ class OCRProcessor:
         if not self.endpoint:
             # Fallback to local OCR or return placeholder
             result = await self._fallback_ocr(image_data)
+            rag_metrics.ocr_pages_processed.inc()
+            rag_metrics.ocr_duration.observe(time.perf_counter() - start_time)
+            return result
+        
+        # Check if Gundam Tiling should be used
+        use_gundam = self.mode == "gundam" or await self._should_use_gundam_tiling(image_data)
+        
+        if use_gundam and self.gundam_config.enabled:
+            result = await self._process_with_gundam_tiling(image_data, context)
             rag_metrics.ocr_pages_processed.inc()
             rag_metrics.ocr_duration.observe(time.perf_counter() - start_time)
             return result
@@ -400,6 +448,309 @@ class OCRProcessor:
             pass
         return None
     
+    # ──────────────────────────────────────────────────────────────────────────
+    # Gundam Tiling Methods
+    # ──────────────────────────────────────────────────────────────────────────
+    
+    async def _should_use_gundam_tiling(self, image_data: bytes) -> bool:
+        """
+        Determine if Gundam Tiling should be used for this image.
+        
+        Checks image dimensions against min_image_size threshold.
+        """
+        try:
+            from PIL import Image
+            import io
+            
+            image = Image.open(io.BytesIO(image_data))
+            width, height = image.size
+            
+            # Use Gundam Tiling for large images
+            return max(width, height) >= self.gundam_config.min_image_size
+        except Exception as e:
+            logger.debug(f"Could not check image size for Gundam Tiling: {e}")
+            return False
+    
+    def _calculate_tiles(
+        self,
+        width: int,
+        height: int,
+    ) -> List[Tuple[int, int, int, int]]:
+        """
+        Calculate tile coordinates with overlap.
+        
+        Args:
+            width: Image width in pixels
+            height: Image height in pixels
+            
+        Returns:
+            List of (x1, y1, x2, y2) tile coordinates
+        """
+        tile_size = self.gundam_config.tile_size
+        overlap = self.gundam_config.overlap
+        max_tiles = self.gundam_config.max_tiles
+        
+        step = tile_size - overlap
+        tiles = []
+        
+        # Calculate grid
+        cols = math.ceil(width / step) if step > 0 else 1
+        rows = math.ceil(height / step) if step > 0 else 1
+        
+        # Limit total tiles
+        if cols * rows > max_tiles:
+            # Reduce tile count by increasing step
+            scale = math.sqrt((cols * rows) / max_tiles)
+            step = int(step * scale)
+            cols = math.ceil(width / step) if step > 0 else 1
+            rows = math.ceil(height / step) if step > 0 else 1
+        
+        for row in range(rows):
+            for col in range(cols):
+                x1 = col * step
+                y1 = row * step
+                x2 = min(x1 + tile_size, width)
+                y2 = min(y1 + tile_size, height)
+                
+                # Adjust start if we're at the edge
+                if x2 == width and x2 - x1 < tile_size:
+                    x1 = max(0, width - tile_size)
+                if y2 == height and y2 - y1 < tile_size:
+                    y1 = max(0, height - tile_size)
+                
+                tiles.append((x1, y1, x2, y2))
+        
+        # Deduplicate overlapping tiles
+        seen = set()
+        unique_tiles = []
+        for tile in tiles:
+            if tile not in seen:
+                seen.add(tile)
+                unique_tiles.append(tile)
+        
+        return unique_tiles[:max_tiles]
+    
+    async def _process_with_gundam_tiling(
+        self,
+        image_data: bytes,
+        context: Optional[str] = None,
+    ) -> OCRResult:
+        """
+        Process image using Gundam Tiling strategy.
+        
+        1. Split image into overlapping tiles
+        2. OCR each tile concurrently
+        3. Merge results using fuzzy matching
+        """
+        try:
+            from PIL import Image
+            import io
+            
+            image = Image.open(io.BytesIO(image_data))
+            width, height = image.size
+            
+            # Calculate tiles
+            tiles = self._calculate_tiles(width, height)
+            logger.info(f"Gundam Tiling: processing {len(tiles)} tiles for {width}x{height} image")
+            
+            if len(tiles) <= 1:
+                # Single tile, just do normal OCR
+                return await self._call_ocr(image_data, "large", context)
+            
+            # Extract tile images
+            tile_images = []
+            for x1, y1, x2, y2 in tiles:
+                tile_img = image.crop((x1, y1, x2, y2))
+                buf = io.BytesIO()
+                tile_img.save(buf, format="PNG")
+                tile_images.append(buf.getvalue())
+            
+            # Process tiles concurrently
+            semaphore = asyncio.Semaphore(4)  # Limit concurrency
+            
+            async def process_tile(tile_data: bytes, tile_idx: int) -> Tuple[int, OCRResult]:
+                async with semaphore:
+                    result = await self._call_ocr(tile_data, "large", context)
+                    return tile_idx, result
+            
+            tasks = [process_tile(tile_data, idx) for idx, tile_data in enumerate(tile_images)]
+            tile_results = await asyncio.gather(*tasks)
+            
+            # Sort by tile index to maintain reading order
+            tile_results = sorted(tile_results, key=lambda x: x[0])
+            
+            # Merge results
+            return self._merge_tile_results(
+                [r for _, r in tile_results],
+                tiles,
+                width,
+                height,
+            )
+            
+        except ImportError:
+            logger.warning("PIL not available, falling back to normal OCR")
+            return await self._call_ocr(image_data, "large", context)
+        except Exception as e:
+            logger.error(f"Gundam Tiling failed: {e}, falling back to normal OCR")
+            return await self._call_ocr(image_data, "large", context)
+    
+    def _merge_tile_results(
+        self,
+        results: List[OCRResult],
+        tiles: List[Tuple[int, int, int, int]],
+        width: int,
+        height: int,
+    ) -> OCRResult:
+        """
+        Merge OCR results from multiple tiles.
+        
+        Uses the configured merge strategy:
+        - "concat": Simple concatenation with newlines
+        - "fuzzy": Fuzzy matching to deduplicate overlap regions
+        - "vote": Confidence-weighted voting for overlap regions
+        """
+        if not results:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                has_tables=False,
+                tables=[],
+                mode_used="gundam",
+                error="No tile results",
+            )
+        
+        strategy = self.gundam_config.merge_strategy
+        
+        if strategy == "concat":
+            merged_text = self._merge_concat(results)
+        elif strategy == "fuzzy":
+            merged_text = self._merge_fuzzy(results, tiles)
+        elif strategy == "vote":
+            merged_text = self._merge_vote(results, tiles)
+        else:
+            merged_text = self._merge_fuzzy(results, tiles)
+        
+        # Calculate aggregate confidence
+        confidences = [r.confidence for r in results if r.confidence > 0]
+        avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        
+        # Collect tables from all tiles
+        all_tables = []
+        for r in results:
+            all_tables.extend(r.tables)
+        
+        return OCRResult(
+            text=merged_text,
+            confidence=avg_confidence,
+            has_tables=len(all_tables) > 0,
+            tables=all_tables,
+            mode_used="gundam",
+            tiles_processed=len(results),
+            tile_confidences=[r.confidence for r in results],
+            metadata={
+                "gundam_tiles": len(tiles),
+                "image_size": f"{width}x{height}",
+                "merge_strategy": strategy,
+            },
+        )
+    
+    def _merge_concat(self, results: List[OCRResult]) -> str:
+        """Simple concatenation of tile texts."""
+        texts = [r.text.strip() for r in results if r.text.strip()]
+        return "\n\n".join(texts)
+    
+    def _merge_fuzzy(
+        self,
+        results: List[OCRResult],
+        tiles: List[Tuple[int, int, int, int]],
+    ) -> str:
+        """
+        Fuzzy merge: Remove duplicate lines that appear in overlapping regions.
+        
+        Uses similarity threshold to detect and deduplicate repeated text
+        from adjacent tiles' overlap zones.
+        """
+        from difflib import SequenceMatcher
+        
+        if len(results) <= 1:
+            return results[0].text if results else ""
+        
+        threshold = self.gundam_config.fuzzy_threshold
+        merged_lines: List[str] = []
+        
+        for result in results:
+            lines = result.text.strip().split("\n")
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if this line is similar to any recent line
+                is_duplicate = False
+                for existing in merged_lines[-10:]:  # Check last 10 lines
+                    similarity = SequenceMatcher(None, line, existing).ratio()
+                    if similarity >= threshold:
+                        is_duplicate = True
+                        break
+                
+                if not is_duplicate:
+                    merged_lines.append(line)
+        
+        return "\n".join(merged_lines)
+    
+    def _merge_vote(
+        self,
+        results: List[OCRResult],
+        tiles: List[Tuple[int, int, int, int]],
+    ) -> str:
+        """
+        Confidence-weighted voting for overlap regions.
+        
+        For lines that appear in multiple tiles' overlap zones,
+        use the version from the higher-confidence tile.
+        """
+        from difflib import SequenceMatcher
+        
+        if len(results) <= 1:
+            return results[0].text if results else ""
+        
+        threshold = self.gundam_config.fuzzy_threshold
+        
+        # Collect all lines with their confidence scores
+        line_scores: Dict[str, Tuple[str, float]] = {}  # normalized -> (original, confidence)
+        
+        for result in results:
+            lines = result.text.strip().split("\n")
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                normalized = line.lower()
+                
+                # Check for similar existing lines
+                best_match = None
+                best_similarity = 0.0
+                
+                for existing_norm in line_scores:
+                    similarity = SequenceMatcher(None, normalized, existing_norm).ratio()
+                    if similarity >= threshold and similarity > best_similarity:
+                        best_match = existing_norm
+                        best_similarity = similarity
+                
+                if best_match:
+                    # Update if this version has higher confidence
+                    existing_line, existing_conf = line_scores[best_match]
+                    if result.confidence > existing_conf:
+                        del line_scores[best_match]
+                        line_scores[normalized] = (line, result.confidence)
+                else:
+                    line_scores[normalized] = (line, result.confidence)
+        
+        # Return lines in order of appearance (using dict order preservation)
+        return "\n".join(orig for orig, _ in line_scores.values())
+
     async def process_batch(
         self,
         images: List[bytes],

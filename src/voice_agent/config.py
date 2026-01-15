@@ -283,6 +283,7 @@ class Settings(BaseSettings):
     rag2_graph_enabled: bool = Field(False, alias="RAG2_GRAPH_ENABLED")
     rag2_rerank_enabled: bool = Field(True, alias="RAG2_RERANK_ENABLED")
     rag2_denoise_enabled: bool = Field(True, alias="RAG2_DENOISE_ENABLED")
+    rag2_entity_extraction_enabled: bool = Field(True, alias="RAG2_ENTITY_EXTRACTION_ENABLED")
     
     # ──────────────────────────────────────────────────────────────────────────
     # RAG 2.0 Configuration - Matryoshka Embeddings
