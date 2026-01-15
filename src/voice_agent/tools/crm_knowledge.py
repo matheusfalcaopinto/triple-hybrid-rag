@@ -41,8 +41,11 @@ def search_knowledge_base(
         List of relevant knowledge base entries with ranking and provenance
     """
     try:
+        # Use RAG 2.0 if enabled (triple-hybrid with graph)
+        if SETTINGS.rag2_enabled:
+            return _search_knowledge_base_rag2(query, category, limit)
         # Try new chunk-based hybrid search first
-        if use_hybrid and SETTINGS.rag_use_hybrid_bm25:
+        elif use_hybrid and SETTINGS.rag_use_hybrid_bm25:
             return _search_knowledge_base_hybrid(query, category, limit)
         else:
             return _search_knowledge_base_legacy(query, category, limit)
@@ -57,6 +60,126 @@ def search_knowledge_base(
                 "query": query,
                 "category": category,
             }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RAG 2.0 Triple-Hybrid Search Implementation
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _search_knowledge_base_rag2(
+    query: str,
+    category: Optional[str] = None,
+    limit: int = 5,
+    org_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    RAG 2.0 triple-hybrid search using lexical + semantic + graph channels.
+    
+    Features:
+    - GPT-5 query planning
+    - Weighted RRF fusion (graph=1.0, semantic=0.8, lexical=0.7)
+    - Child → Parent chunk expansion
+    - Reranking with safety threshold
+    - Conformal denoising
+    """
+    from voice_agent.rag2.retrieval import RAG2Retriever
+    
+    supabase = get_supabase_client()
+    
+    # Get org_id from parameter or find one with RAG2 documents
+    if not org_id:
+        # Try to find an org that has RAG2 documents
+        doc_check = supabase.table("rag_documents").select("org_id").limit(1).execute()
+        if doc_check.data:
+            org_id = str(doc_check.data[0]["org_id"])
+            logger.debug(f"Using org_id from RAG2 documents: {org_id}")
+        else:
+            # Fall back to first org
+            org_response = supabase.table("organizations").select("id").limit(1).execute()
+            if not org_response.data:
+                logger.warning("No organization found, falling back to hybrid search")
+                return _search_knowledge_base_hybrid(query, category, limit)
+            org_id = str(org_response.data[0]["id"])
+    
+    # Create RAG2 retriever with graph channel if enabled
+    retriever = RAG2Retriever(
+        org_id=str(org_id),
+        graph_enabled=SETTINGS.rag2_graph_enabled,
+    )
+    
+    # Run async retrieval synchronously
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    # Execute retrieval (collection maps to category filter conceptually)
+    result = loop.run_until_complete(
+        retriever.retrieve(
+            query=query,
+            collection=category,  # Use category as collection filter
+            top_k=limit,
+        )
+    )
+    
+    # Handle refusal (safety threshold not met)
+    if result.refused:
+        logger.warning(f"RAG2 refused query: {result.refusal_reason}")
+        return {
+            "success": True,
+            "query": query,
+            "category": category,
+            "result_count": 0,
+            "search_type": "rag2_triple_hybrid",
+            "refused": True,
+            "refusal_reason": result.refusal_reason,
+            "results": [],
+        }
+    
+    # Format results to match expected tool response format
+    results = []
+    for i, ctx in enumerate(result.contexts):
+        # Use parent_text if available (expanded), otherwise child text
+        content = ctx.parent_text if ctx.parent_text else ctx.text
+        
+        results.append({
+            "chunk_id": ctx.child_id,
+            "parent_id": ctx.parent_id,
+            "document_id": ctx.document_id,
+            "category": category,
+            "title": ctx.section_heading or "",
+            "content": content,
+            "source_document": None,  # Could be fetched from rag_documents if needed
+            "page": ctx.page,
+            "chunk_index": None,  # Not stored in RAG2 candidate
+            "modality": ctx.modality,
+            "relevance_rank": i + 1,
+            "similarity_score": round(ctx.rrf_score, 4) if ctx.rrf_score else None,
+            "rerank_score": round(ctx.rerank_score, 4) if ctx.rerank_score else None,
+            "ocr_confidence": None,  # Could be fetched from rag_child_chunks if needed
+            "is_table": ctx.modality == "table",
+            "table_context": None,
+            "alt_text": None,
+            # RAG2-specific fields
+            "lexical_rank": ctx.lexical_rank,
+            "semantic_rank": ctx.semantic_rank,
+            "graph_rank": ctx.graph_rank,
+        })
+    
+    # Build timing info for debugging
+    timings_summary = {k: round(v * 1000, 2) for k, v in result.timings.items()}
+    
+    return {
+        "success": True,
+        "query": query,
+        "category": category,
+        "result_count": len(results),
+        "search_type": "rag2_triple_hybrid",
+        "max_rerank_score": round(result.max_rerank_score, 4) if result.max_rerank_score else None,
+        "timings_ms": timings_summary,
+        "results": results,
+    }
 
 
 def _search_knowledge_base_hybrid(

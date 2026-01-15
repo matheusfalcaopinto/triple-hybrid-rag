@@ -337,16 +337,16 @@ class RAG2Retriever:
             
             # Fetch chunk details for the returned chunk IDs
             chunk_result = self.supabase.table("rag_child_chunks").select(
-                "id, parent_chunk_id, document_id, text, page_number, modality"
+                "id, parent_id, document_id, text, page, modality"
             ).in_("id", result.chunk_ids[:limit]).execute()
             
             return [
                 {
                     "child_id": r["id"],
-                    "parent_id": r["parent_chunk_id"],
+                    "parent_id": r["parent_id"],
                     "document_id": r["document_id"],
                     "text": r["text"],
-                    "page": r.get("page_number", 1),
+                    "page": r.get("page", 1),
                     "modality": r.get("modality", "text"),
                 }
                 for r in chunk_result.data

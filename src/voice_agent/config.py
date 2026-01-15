@@ -323,7 +323,21 @@ class Settings(BaseSettings):
     # RAG 2.0 Configuration - Knowledge Graph (PuppyGraph)
     # ──────────────────────────────────────────────────────────────────────────
     rag2_puppygraph_url: str = Field("http://localhost:8182", alias="RAG2_PUPPYGRAPH_URL")
+    rag2_puppygraph_timeout: float = Field(30.0, alias="RAG2_PUPPYGRAPH_TIMEOUT")
     rag2_kg_ner_model: str = Field("gpt-5-nano", alias="RAG2_KG_NER_MODEL")
+    rag2_entity_types: str = Field(
+        "PERSON,ORGANIZATION,PRODUCT,CLAUSE,DATE,MONEY,LOCATION",
+        alias="RAG2_ENTITY_TYPES"
+    )
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG 2.0 Configuration - Gundam Tiling (OCR Enhancement)
+    # ──────────────────────────────────────────────────────────────────────────
+    rag2_gundam_tiling_enabled: bool = Field(True, alias="RAG2_GUNDAM_TILING_ENABLED")
+    rag2_gundam_min_image_size: int = Field(1500, alias="RAG2_GUNDAM_MIN_IMAGE_SIZE")
+    rag2_gundam_tile_size: int = Field(1024, alias="RAG2_GUNDAM_TILE_SIZE")
+    rag2_gundam_overlap: int = Field(128, alias="RAG2_GUNDAM_OVERLAP")
+    rag2_gundam_merge_strategy: str = Field("fuzzy", alias="RAG2_GUNDAM_MERGE_STRATEGY")
     
     # ──────────────────────────────────────────────────────────────────────────
     # Derived Properties

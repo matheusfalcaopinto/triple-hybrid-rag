@@ -20,6 +20,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+import httpx
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+    RetryError,
+)
+
 from voice_agent.config import SETTINGS
 from voice_agent.ingestion.loader import DocumentLoader, LoadedDocument
 from voice_agent.ingestion.ocr import OCRProcessor
@@ -453,6 +463,67 @@ class RAG2Ingestor:
         
         return stored_parents
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((httpx.HTTPError, TimeoutError, ConnectionError, OSError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def _extract_entities_for_parent(
+        self,
+        parent_id: str,
+        parent_text: str,
+        parent_context: Optional[str],
+        document_title: str,
+        document_id: str,
+        db_parent_id: str,
+        child_ids: List[str],
+    ) -> Dict[str, int]:
+        """
+        Extract entities for a single parent chunk with retry logic.
+        
+        Retries up to 3 times with exponential backoff (2s, 4s, 8s)
+        on transient HTTP/connection errors.
+        
+        Args:
+            parent_id: Parent chunk ID (for logging)
+            parent_text: Text to extract entities from
+            parent_context: Optional section heading context
+            document_title: Document title for context
+            document_id: Database document ID
+            db_parent_id: Database parent chunk ID
+            child_ids: List of child chunk database IDs
+            
+        Returns:
+            Dict with entities_created and relations_created counts
+        """
+        assert self.entity_extractor is not None, "Entity extractor not initialized"
+        
+        result = await self.entity_extractor.extract(
+            text=parent_text,
+            context=parent_context,
+            document_title=document_title,
+        )
+        
+        if result.errors:
+            # Raise to trigger retry on errors
+            raise RuntimeError(f"Entity extraction returned errors: {result.errors}")
+        
+        # Store extracted data
+        store_stats = await self.entity_store.store_extraction(
+            result=result,
+            org_id=self.org_id,
+            document_id=document_id,
+            parent_chunk_id=db_parent_id,
+            child_chunk_ids=child_ids,
+        )
+        
+        return {
+            "entities_created": store_stats.get("entities_created", 0),
+            "relations_created": store_stats.get("relations_created", 0),
+        }
+    
     async def _extract_entities(
         self,
         doc_id: str,
@@ -466,50 +537,63 @@ class RAG2Ingestor:
         
         Uses GPT-5 to perform NER and relation extraction, storing results
         in rag_entities and rag_relations tables.
+        
+        Each parent extraction is retried up to 3 times on transient failures.
+        Failed parents are logged but don't stop the pipeline.
         """
         if not self.entity_extractor:
             return
         
         logger.info(f"Extracting entities from {len(parents)} parent chunks...")
         
+        failed_parents: List[str] = []
+        
         # Extract from each parent chunk
         for parent in parents:
+            # Get stored parent info
+            parent_info = stored_parents.get(parent.id)
+            if not parent_info:
+                continue
+            
+            db_parent_id = parent_info["db_id"]
+            child_ids = parent_info["child_ids"]
+            
             try:
-                # Get stored parent info
-                parent_info = stored_parents.get(parent.id)
-                if not parent_info:
-                    continue
-                
-                db_parent_id = parent_info["db_id"]
-                child_ids = parent_info["child_ids"]
-                
-                # Extract entities and relations
-                result = await self.entity_extractor.extract(
-                    text=parent.text,
-                    context=parent.section_heading,
+                result = await self._extract_entities_for_parent(
+                    parent_id=parent.id,
+                    parent_text=parent.text,
+                    parent_context=parent.section_heading,
                     document_title=title,
-                )
-                
-                if result.errors:
-                    for error in result.errors:
-                        stats.errors.append(f"Entity extraction: {error}")
-                    continue
-                
-                # Store extracted data
-                store_stats = await self.entity_store.store_extraction(
-                    result=result,
-                    org_id=self.org_id,
                     document_id=doc_id,
-                    parent_chunk_id=db_parent_id,
-                    child_chunk_ids=child_ids,
+                    db_parent_id=db_parent_id,
+                    child_ids=child_ids,
                 )
                 
-                stats.entities_extracted += store_stats["entities_created"]
-                stats.relations_extracted += store_stats["relations_created"]
+                stats.entities_extracted += result["entities_created"]
+                stats.relations_extracted += result["relations_created"]
                 
+            except RetryError as e:
+                # All retries exhausted
+                logger.error(
+                    f"Entity extraction failed after 3 retries for parent {parent.id}: "
+                    f"{e.last_attempt.exception()}"
+                )
+                failed_parents.append(parent.id)
+                stats.errors.append(
+                    f"Entity extraction failed (retries exhausted) for {parent.id}: "
+                    f"{e.last_attempt.exception()}"
+                )
             except Exception as e:
+                # Non-retryable error
                 logger.warning(f"Entity extraction failed for parent {parent.id}: {e}")
+                failed_parents.append(parent.id)
                 stats.errors.append(f"Entity extraction error: {e}")
+        
+        if failed_parents:
+            logger.warning(
+                f"Entity extraction failed for {len(failed_parents)}/{len(parents)} parents: "
+                f"{failed_parents[:5]}{'...' if len(failed_parents) > 5 else ''}"
+            )
         
         logger.info(
             f"Extracted {stats.entities_extracted} entities, "

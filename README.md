@@ -161,6 +161,28 @@ cd database
 docker-compose up -d
 ```
 
+## RAG 2.0
+
+The voice agent uses **RAG 2.0** with triple-hybrid retrieval for intelligent document search:
+
+| Channel | Weight | Purpose |
+|---------|--------|---------|
+| Graph | 1.0 | Entity relationships via PuppyGraph |
+| Semantic | 0.8 | Concept similarity via embeddings |
+| Lexical | 0.7 | Keyword matching via BM25 |
+
+**Features:**
+- ✅ Triple-hybrid retrieval (Lexical + Semantic + Graph)
+- ✅ GPT-5 entity extraction with knowledge graph
+- ✅ Weighted RRF fusion
+- ✅ Late interaction reranking
+- ✅ Safety thresholds & conformal denoising
+- ✅ Gundam Tiling OCR for large images
+
+**Test Coverage:** 195 passing tests
+
+See [RAG 2.0 Documentation](docs/RAG2.0/README.md) for details.
+
 ## License
 
 Proprietary

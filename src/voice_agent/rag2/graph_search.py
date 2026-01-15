@@ -163,8 +163,8 @@ class SQLGraphFallback:
                 kw = keyword  # Bind loop variable for lambda
                 response = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda kw=kw: self.db.table("entities")
-                    .select("id, entity_type, name, properties")
+                    lambda kw=kw: self.db.table("rag_entities")
+                    .select("id, entity_type, name, metadata")
                     .eq("org_id", org_id)
                     .ilike("name", f"%{kw}%")
                     .limit(limit // len(keywords))
@@ -177,7 +177,7 @@ class SQLGraphFallback:
                         label=row["entity_type"],
                         properties={
                             "name": row["name"],
-                            **(row.get("properties") or {}),
+                            **(row.get("metadata") or {}),
                         },
                     ))
             except Exception as e:
@@ -197,48 +197,48 @@ class SQLGraphFallback:
         
         edges: List[GraphEdge] = []
         select_cols = (
-            "id, source_entity_id, target_entity_id, "
-            "relation_type, properties, confidence"
+            "id, subject_entity_id, object_entity_id, "
+            "relation_type, metadata, confidence"
         )
         
         try:
             # Find outgoing relations
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.db.table("relations")
+                lambda: self.db.table("rag_relations")
                 .select(select_cols)
                 .eq("org_id", org_id)
-                .in_("source_entity_id", entity_ids)
+                .in_("subject_entity_id", entity_ids)
                 .limit(limit)
                 .execute()
             )
             
             for row in response.data:
                 edges.append(GraphEdge(
-                    source_id=row["source_entity_id"],
-                    target_id=row["target_entity_id"],
+                    source_id=row["subject_entity_id"],
+                    target_id=row["object_entity_id"],
                     relationship=row["relation_type"],
-                    properties=row.get("properties") or {},
+                    properties=row.get("metadata") or {},
                     confidence=row.get("confidence", 1.0),
                 ))
             
             # Find incoming relations
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.db.table("relations")
+                lambda: self.db.table("rag_relations")
                 .select(select_cols)
                 .eq("org_id", org_id)
-                .in_("target_entity_id", entity_ids)
+                .in_("object_entity_id", entity_ids)
                 .limit(limit)
                 .execute()
             )
             
             for row in response.data:
                 edges.append(GraphEdge(
-                    source_id=row["source_entity_id"],
-                    target_id=row["target_entity_id"],
+                    source_id=row["subject_entity_id"],
+                    target_id=row["object_entity_id"],
                     relationship=row["relation_type"],
-                    properties=row.get("properties") or {},
+                    properties=row.get("metadata") or {},
                     confidence=row.get("confidence", 1.0),
                 ))
         except Exception as e:
@@ -258,7 +258,7 @@ class SQLGraphFallback:
         try:
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.db.table("entity_mentions")
+                lambda: self.db.table("rag_entity_mentions")
                 .select("child_chunk_id")
                 .in_("entity_id", entity_ids)
                 .limit(limit)
