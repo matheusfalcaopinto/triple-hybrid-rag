@@ -4,10 +4,13 @@ Qwen3-VL Multimodal Reranker Module
 Provides precision reranking of search results using Qwen3-VL-Reranker-8B.
 Supports both text-only and multimodal (text + image) reranking.
 
-The reranker uses a yes/no classification approach:
-- Sends query-document pairs to the VL model
-- Model judges relevance and outputs "yes" or "no"
-- Uses logprobs to extract confidence scores
+The reranker supports two modes:
+1. Native /rerank endpoint (vLLM with --runner pooling): Uses dedicated scoring API
+2. Chat-based fallback: Uses yes/no classification with logprobs
+
+For vLLM, serve the model with:
+  vllm serve Qwen/Qwen3-VL-Reranker-2B --runner pooling --hf_overrides \
+    '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"]}'
 """
 
 import asyncio
@@ -17,6 +20,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 from openai import AsyncOpenAI, OpenAI
 
 from voice_agent.config import SETTINGS
@@ -279,6 +283,75 @@ class Qwen3VLReranker:
         except Exception as e:
             logger.error(f"Error scoring pair: {e}")
             return 0.5  # Neutral score on error
+
+    async def _rerank_batch_native(
+        self,
+        query: str,
+        documents: List[str],
+    ) -> List[float]:
+        """
+        Score documents using native /rerank endpoint (vLLM with --runner pooling).
+        
+        This is more efficient than chat-based scoring as it:
+        1. Batches all documents in a single request
+        2. Uses dedicated scoring architecture
+        3. Returns calibrated relevance scores
+        
+        Args:
+            query: The search query
+            documents: List of document texts to score
+            
+        Returns:
+            List of relevance scores (0.0 to 1.0) for each document
+        """
+        # Build the rerank endpoint URL (replace /v1 suffix with /rerank)
+        base_url = self.api_base.rstrip('/')
+        if base_url.endswith('/v1'):
+            rerank_url = base_url[:-3] + '/rerank'
+        else:
+            rerank_url = base_url + '/rerank'
+        
+        payload = {
+            "model": self.model_name,
+            "query": query,
+            "documents": documents,
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    rerank_url,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                response.raise_for_status()
+                data = response.json()
+            
+            # Parse vLLM rerank response format:
+            # {"results": [{"index": 0, "relevance_score": 0.93}, ...]}
+            results = data.get("results", [])
+            
+            # Initialize scores with neutral values
+            scores = [0.5] * len(documents)
+            
+            for result in results:
+                idx = result.get("index", 0)
+                score = result.get("relevance_score", 0.5)
+                if 0 <= idx < len(scores):
+                    scores[idx] = score
+            
+            logger.debug(f"Native rerank scores: {scores[:5]}...")
+            return scores
+            
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.warning("Native /rerank endpoint not available, falling back to chat mode")
+                raise  # Re-raise to trigger fallback
+            logger.error(f"Rerank HTTP error: {e}")
+            return [0.5] * len(documents)
+        except Exception as e:
+            logger.error(f"Native rerank error: {e}")
+            return [0.5] * len(documents)
     
     async def rerank(
         self,
@@ -288,6 +361,9 @@ class Qwen3VLReranker:
     ) -> List[SearchResult]:
         """
         Rerank search results using Qwen3-VL-Reranker.
+        
+        Tries native /rerank endpoint first (vLLM with --runner pooling),
+        falls back to chat-based scoring if not available.
         
         Args:
             query: Original search query
@@ -307,32 +383,52 @@ class Qwen3VLReranker:
         candidates = results[:min(len(results), 50)]
         
         try:
-            # Score all pairs concurrently (with concurrency limit)
-            semaphore = asyncio.Semaphore(5)  # Limit concurrent requests
+            # Try native /rerank endpoint first (more efficient)
+            documents = []
+            for result in candidates:
+                doc_text, _ = self._prepare_document(result)
+                documents.append(doc_text)
             
-            async def score_with_limit(idx: int, result: SearchResult) -> Tuple[int, float]:
-                async with semaphore:
-                    doc_text, image_b64 = self._prepare_document(result)
-                    score = await self._score_pair(query, doc_text, image_b64)
-                    return idx, score
+            try:
+                scores = await self._rerank_batch_native(query, documents)
+                use_native = True
+                logger.debug("Using native /rerank endpoint")
+            except (httpx.HTTPStatusError, Exception) as e:
+                # Fall back to chat-based scoring
+                logger.debug(f"Native rerank unavailable ({e}), using chat fallback")
+                use_native = False
+                
+                # Score all pairs concurrently (with concurrency limit)
+                semaphore = asyncio.Semaphore(5)  # Limit concurrent requests
+                
+                async def score_with_limit(idx: int, result: SearchResult) -> Tuple[int, float]:
+                    async with semaphore:
+                        doc_text, image_b64 = self._prepare_document(result)
+                        score = await self._score_pair(query, doc_text, image_b64)
+                        return idx, score
+                
+                tasks = [
+                    score_with_limit(i, result)
+                    for i, result in enumerate(candidates)
+                ]
+                
+                scored_pairs = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Convert to scores list
+                scores = [0.5] * len(candidates)
+                for pair_result in scored_pairs:
+                    if isinstance(pair_result, Exception):
+                        logger.error(f"Reranking task failed: {pair_result}")
+                        continue
+                    idx, score = pair_result
+                    scores[idx] = score
             
-            tasks = [
-                score_with_limit(i, result)
-                for i, result in enumerate(candidates)
-            ]
-            
-            scored_pairs = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Create rerank results
+            # Create rerank results from scores
             reranked = []
-            for result in scored_pairs:
-                if isinstance(result, Exception):
-                    logger.error(f"Reranking task failed: {result}")
-                    continue
-                idx, score = result
-                candidates[idx].rerank_score = score
+            for idx, (result, score) in enumerate(zip(candidates, scores)):
+                result.rerank_score = score
                 reranked.append(RerankResult(
-                    search_result=candidates[idx],
+                    search_result=result,
                     rerank_score=score,
                     original_rank=idx,
                 ))

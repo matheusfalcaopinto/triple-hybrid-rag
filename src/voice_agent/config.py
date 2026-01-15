@@ -277,6 +277,54 @@ class Settings(BaseSettings):
     rag_fts_language: str = Field("portuguese", alias="RAG_FTS_LANGUAGE")
     
     # ──────────────────────────────────────────────────────────────────────────
+    # RAG 2.0 Configuration - Feature Flags
+    # ──────────────────────────────────────────────────────────────────────────
+    rag2_enabled: bool = Field(False, alias="RAG2_ENABLED")
+    rag2_graph_enabled: bool = Field(False, alias="RAG2_GRAPH_ENABLED")
+    rag2_rerank_enabled: bool = Field(True, alias="RAG2_RERANK_ENABLED")
+    rag2_denoise_enabled: bool = Field(True, alias="RAG2_DENOISE_ENABLED")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG 2.0 Configuration - Matryoshka Embeddings
+    # ──────────────────────────────────────────────────────────────────────────
+    # Model outputs 4096d, we truncate to 1024d (prefix) for storage/search
+    rag2_embed_dim_store: int = Field(1024, alias="RAG2_EMBED_DIM_STORE")
+    rag2_embed_dim_model: int = Field(4096, alias="RAG2_EMBED_DIM_MODEL")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG 2.0 Configuration - Parent/Child Chunking
+    # ──────────────────────────────────────────────────────────────────────────
+    rag2_parent_chunk_tokens: int = Field(800, alias="RAG2_PARENT_CHUNK_TOKENS")
+    rag2_child_chunk_tokens: int = Field(200, alias="RAG2_CHILD_CHUNK_TOKENS")
+    rag2_parent_chunk_max_tokens: int = Field(1000, alias="RAG2_PARENT_CHUNK_MAX_TOKENS")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG 2.0 Configuration - Retrieval
+    # ──────────────────────────────────────────────────────────────────────────
+    rag2_safety_threshold: float = Field(0.6, alias="RAG2_SAFETY_THRESHOLD")
+    rag2_denoise_alpha: float = Field(0.6, alias="RAG2_DENOISE_ALPHA")
+    rag2_lexical_weight: float = Field(0.7, alias="RAG2_LEXICAL_WEIGHT")
+    rag2_semantic_weight: float = Field(0.8, alias="RAG2_SEMANTIC_WEIGHT")
+    rag2_graph_weight: float = Field(1.0, alias="RAG2_GRAPH_WEIGHT")
+    rag2_lexical_top_k: int = Field(50, alias="RAG2_LEXICAL_TOP_K")
+    rag2_semantic_top_k: int = Field(100, alias="RAG2_SEMANTIC_TOP_K")
+    rag2_graph_top_k: int = Field(50, alias="RAG2_GRAPH_TOP_K")
+    rag2_rerank_top_k: int = Field(20, alias="RAG2_RERANK_TOP_K")
+    rag2_final_top_k: int = Field(5, alias="RAG2_FINAL_TOP_K")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG 2.0 Configuration - Query Planner (GPT-5)
+    # ──────────────────────────────────────────────────────────────────────────
+    rag2_query_planner_model: str = Field("gpt-5-nano", alias="RAG2_QUERY_PLANNER_MODEL")
+    rag2_query_planner_temperature: float = Field(0.0, alias="RAG2_QUERY_PLANNER_TEMPERATURE")
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # RAG 2.0 Configuration - Knowledge Graph (PuppyGraph)
+    # ──────────────────────────────────────────────────────────────────────────
+    rag2_puppygraph_url: str = Field("http://localhost:8182", alias="RAG2_PUPPYGRAPH_URL")
+    rag2_kg_ner_model: str = Field("gpt-5-nano", alias="RAG2_KG_NER_MODEL")
+    
+    # ──────────────────────────────────────────────────────────────────────────
     # Derived Properties
     # ──────────────────────────────────────────────────────────────────────────
     @property

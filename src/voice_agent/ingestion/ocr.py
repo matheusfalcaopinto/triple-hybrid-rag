@@ -21,17 +21,8 @@ import httpx
 from voice_agent.config import SETTINGS
 from voice_agent.observability.rag_metrics import rag_metrics
 
-# Default OCR prompt for Qwen3-VL
-OCR_PROMPT = """Perform OCR on this image and extract all text content accurately.
-
-Instructions:
-1. Extract ALL text exactly as it appears, preserving formatting
-2. For tables, output them in Markdown table format with | separators
-3. Preserve paragraph structure and line breaks
-4. If there's handwritten text, do your best to transcribe it
-5. Do NOT add any commentary or explanations - output only the extracted text
-
-Output the extracted text below:"""
+# Default OCR prompt - kept simple for compatibility with DeepSeek-OCR
+OCR_PROMPT = """OCR this image. Extract all text exactly as it appears. For tables, use Markdown format. Output only the extracted text."""
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +225,7 @@ class OCRProcessor:
                         ]
                     }
                 ],
-                "max_tokens": 4096,
+                "max_tokens": 2048,  # Reduced from 4096 to leave room for input tokens
                 "temperature": 0.1,  # Low temperature for accurate OCR
             }
             
