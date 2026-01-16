@@ -1,0 +1,112 @@
+{
+  "catalogs": [
+    {
+      "name": "postgres_rag",
+      "type": "postgresql",
+      "jdbc": {
+        "url": "jdbc:postgresql://postgres:5432/rag_db",
+        "username": "postgres",
+        "password": "postgres"
+      }
+    }
+  ],
+  "vertices": [
+    {
+      "label": "Entity",
+      "catalog": "postgres_rag",
+      "schema": "public",
+      "table": "rag_entities",
+      "mappings": {
+        "id": "id",
+        "tenant_id": "tenant_id",
+        "document_id": "document_id",
+        "entity_type": "entity_type",
+        "name": "name",
+        "canonical_name": "canonical_name",
+        "description": "description"
+      }
+    },
+    {
+      "label": "Chunk",
+      "catalog": "postgres_rag",
+      "schema": "public",
+      "table": "rag_child_chunks",
+      "mappings": {
+        "id": "id",
+        "parent_id": "parent_id",
+        "document_id": "document_id",
+        "tenant_id": "tenant_id",
+        "text": "text",
+        "page": "page",
+        "modality": "modality"
+      }
+    },
+    {
+      "label": "Document",
+      "catalog": "postgres_rag",
+      "schema": "public",
+      "table": "rag_documents",
+      "mappings": {
+        "id": "id",
+        "tenant_id": "tenant_id",
+        "file_name": "file_name",
+        "collection": "collection",
+        "title": "title"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "MENTIONED_IN",
+      "catalog": "postgres_rag",
+      "schema": "public",
+      "table": "rag_entity_mentions",
+      "mappings": {
+        "from": {
+          "label": "Entity",
+          "field": "entity_id"
+        },
+        "to": {
+          "label": "Chunk",
+          "field": "child_chunk_id"
+        }
+      }
+    },
+    {
+      "label": "RELATED_TO",
+      "catalog": "postgres_rag",
+      "schema": "public",
+      "table": "rag_relations",
+      "mappings": {
+        "from": {
+          "label": "Entity",
+          "field": "subject_entity_id"
+        },
+        "to": {
+          "label": "Entity",
+          "field": "object_entity_id"
+        },
+        "properties": {
+          "relation_type": "relation_type",
+          "confidence": "confidence"
+        }
+      }
+    },
+    {
+      "label": "FROM_DOCUMENT",
+      "catalog": "postgres_rag",
+      "schema": "public",
+      "table": "rag_child_chunks",
+      "mappings": {
+        "from": {
+          "label": "Chunk",
+          "field": "id"
+        },
+        "to": {
+          "label": "Document",
+          "field": "document_id"
+        }
+      }
+    }
+  ]
+}
