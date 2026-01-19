@@ -675,6 +675,11 @@ class OCRProcessor:
                 prompt = f"Context: {context}\n\n{prompt}"
 
             # Prepare OpenAI-compatible chat completion request
+            # Calculate max_tokens dynamically to avoid context overflow
+            # DeepSeek-OCR has 2048 context limit, so we use 1500 for output
+            # to leave room for ~500 input tokens (prompt + image tokens)
+            max_tokens = 1500
+            
             payload = {
                 "model": self.model,
                 "messages": [
@@ -694,7 +699,7 @@ class OCRProcessor:
                         ],
                     }
                 ],
-                "max_tokens": 2048,
+                "max_tokens": max_tokens,
                 "temperature": 0.1,
             }
 

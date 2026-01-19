@@ -11,6 +11,7 @@ This class wires together:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -116,7 +117,8 @@ class RAG:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await _upsert_document(
+                # Upsert document and get the actual ID (may be different on conflict)
+                actual_doc_id = await _upsert_document(
                     conn,
                     document_id=document_id,
                     tenant_id=tenant_id,
@@ -126,6 +128,15 @@ class RAG:
                     collection=collection,
                     title=title or path.stem,
                 )
+                
+                # Update chunks with actual document ID if different
+                if actual_doc_id != document_id:
+                    for p in parents:
+                        p.document_id = actual_doc_id
+                    for c in children:
+                        c.document_id = actual_doc_id
+                    result.document_id = actual_doc_id
+                
                 await _insert_parent_chunks(conn, parents)
                 await _insert_child_chunks(conn, children)
 
@@ -296,31 +307,61 @@ async def _upsert_document(
     file_hash: str,
     collection: str,
     title: str,
-) -> None:
-    await conn.execute(
-        """
-        INSERT INTO rag_documents (
-            id, tenant_id, hash_sha256, file_name, file_path, collection, title, ingestion_status, created_at, updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
-        ON CONFLICT (tenant_id, hash_sha256)
-        DO UPDATE SET
-            file_name = EXCLUDED.file_name,
-            file_path = EXCLUDED.file_path,
-            collection = EXCLUDED.collection,
-            title = EXCLUDED.title,
-            updated_at = EXCLUDED.updated_at
-        """,
-        document_id,
+) -> UUID:
+    """
+    Insert or update a document, returning the actual document ID.
+    
+    On conflict, the existing document's ID is returned (not the new one).
+    """
+    # First try to get existing document with same hash
+    existing_id = await conn.fetchval(
+        "SELECT id FROM rag_documents WHERE tenant_id = $1 AND hash_sha256 = $2",
         tenant_id,
         file_hash,
-        file_name,
-        file_path,
-        collection,
-        title,
-        IngestionStatus.PROCESSING.value,
-        datetime.utcnow(),
     )
+    
+    if existing_id:
+        # Update existing document
+        await conn.execute(
+            """
+            UPDATE rag_documents
+            SET file_name = $2,
+                file_path = $3,
+                collection = $4,
+                title = $5,
+                ingestion_status = $6,
+                updated_at = $7
+            WHERE id = $1
+            """,
+            existing_id,
+            file_name,
+            file_path,
+            collection,
+            title,
+            IngestionStatus.PROCESSING.value,
+            datetime.utcnow(),
+        )
+        return existing_id
+    else:
+        # Insert new document
+        await conn.execute(
+            """
+            INSERT INTO rag_documents (
+                id, tenant_id, hash_sha256, file_name, file_path, collection, title, ingestion_status, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+            """,
+            document_id,
+            tenant_id,
+            file_hash,
+            file_name,
+            file_path,
+            collection,
+            title,
+            IngestionStatus.PROCESSING.value,
+            datetime.utcnow(),
+        )
+        return document_id
 
 
 async def _update_document_status(
@@ -363,7 +404,7 @@ async def _insert_parent_chunks(conn: asyncpg.Connection, parents: List[ParentCh
                 p.page_end,
                 p.section_heading,
                 p.ocr_confidence,
-                p.metadata,
+                json.dumps(p.metadata) if isinstance(p.metadata, dict) else p.metadata,
             )
             for p in parents
         ],
@@ -403,7 +444,7 @@ async def _insert_child_chunks(conn: asyncpg.Connection, children: List[ChildChu
                 if c.image_embedding
                 else None,
                 c.image_data,
-                c.metadata,
+                json.dumps(c.metadata) if isinstance(c.metadata, dict) else c.metadata,
             )
             for c in children
         ],
