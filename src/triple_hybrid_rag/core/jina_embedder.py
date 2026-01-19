@@ -1,22 +1,16 @@
 """
-Multimodal Embedder for Triple-Hybrid-RAG
+Jina AI Embedder for Triple-Hybrid-RAG
 
-Supports:
-- Text embeddings via OpenAI-compatible API (Qwen3-VL-Embedding-2B)
-- Image embeddings for direct multimodal retrieval
-- Mixed text+image embeddings
-- Matryoshka truncation (2048d → 1024d)
-
-Optimizations:
-- Concurrent batch embedding with aiohttp connection pooling
-- Configurable concurrency (default: 8 parallel batches)
-- Progress callback support for long-running operations
+Multimodal embedder using Jina AI API:
+- Text embeddings via jina-embeddings-v4
+- Image embeddings (direct multimodal support)
+- Matryoshka dimension truncation
+- Rate limiting and retry logic
 """
 
 import asyncio
 import base64
 import logging
-from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
 
 import aiohttp
@@ -29,51 +23,53 @@ from triple_hybrid_rag.types import ChildChunk
 logger = logging.getLogger(__name__)
 
 
-def get_embedder(config: Optional[RAGConfig] = None):
+class JinaEmbedder:
     """
-    Factory function to get the appropriate embedder based on configuration.
+    Jina AI multimodal embedder.
     
-    Args:
-        config: Optional RAG configuration
-        
-    Returns:
-        JinaEmbedder if provider is 'jina', MultimodalEmbedder otherwise
+    Uses Jina AI API for:
+    - Text embeddings (jina-embeddings-v4)
+    - Image embeddings (multimodal support)
+    - Late interaction embeddings
+    
+    Supports task-specific embeddings:
+    - retrieval.query: For query embeddings
+    - retrieval.passage: For document/passage embeddings
     """
-    config = config or get_settings()
     
-    if config.rag_embed_provider.lower() == "jina":
-        from triple_hybrid_rag.core.jina_embedder import JinaEmbedder
-        return JinaEmbedder(config)
-    
-    return MultimodalEmbedder(config)
-
-class MultimodalEmbedder:
-    """
-    Multimodal embedder supporting text and image inputs.
-    
-    Uses Qwen3-VL-Embedding via OpenAI-compatible API for:
-    - Text embeddings
-    - Image embeddings (direct vision encoding)
-    - Mixed text+image embeddings
-    """
+    JINA_API_BASE = "https://api.jina.ai/v1"
     
     def __init__(self, config: Optional[RAGConfig] = None):
-        """Initialize the embedder with configuration."""
+        """Initialize the Jina embedder with configuration."""
         self.config = config or get_settings()
-        self.api_base = self.config.rag_embed_api_base.rstrip("/")
-        self.model = self.config.rag_embed_model
-        self.batch_size = self.config.rag_embed_batch_size
-        self.timeout = self.config.rag_embed_timeout
-        self.dim_model = self.config.rag_embed_dim_model
-        self.dim_store = self.config.rag_embed_dim_store
-        self.use_matryoshka = self.config.rag_matryoshka_embeddings
+        
+        # Jina-specific settings
+        self.api_key = self.config.jina_api_key
+        self.api_base = self.config.jina_api_base.rstrip("/")
+        self.model = self.config.jina_embed_model
+        self.dimensions = self.config.jina_embed_dimensions
+        self.task_query = self.config.jina_embed_task_query
+        self.task_passage = self.config.jina_embed_task_passage
+        self.batch_size = self.config.jina_embed_batch_size
+        self.timeout = self.config.jina_embed_timeout
+        
+        # Rate limiting (500 RPM = ~8.3 req/sec, be conservative)
+        self._rate_limit_delay = 0.15  # 150ms between requests
+        self._last_request_time = 0.0
         
         self._client: Optional[httpx.AsyncClient] = None
     
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
         return self._client
     
     async def close(self):
@@ -81,39 +77,31 @@ class MultimodalEmbedder:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
     
-    def _truncate_embedding(self, embedding: List[float]) -> List[float]:
-        """
-        Truncate embedding using Matryoshka property.
-        
-        Matryoshka embeddings maintain semantic meaning when truncated
-        to smaller dimensions (2048 → 1024).
-        """
-        if not self.use_matryoshka:
-            return embedding
-        
-        if len(embedding) <= self.dim_store:
-            return embedding
-        
-        # Truncate and normalize
-        truncated = embedding[:self.dim_store]
-        norm = np.linalg.norm(truncated)
-        if norm > 0:
-            truncated = (np.array(truncated) / norm).tolist()
-        
-        return truncated
+    async def _rate_limit(self):
+        """Apply rate limiting between requests."""
+        import time
+        now = time.time()
+        elapsed = now - self._last_request_time
+        if elapsed < self._rate_limit_delay:
+            await asyncio.sleep(self._rate_limit_delay - elapsed)
+        self._last_request_time = time.time()
     
     async def embed_texts(
         self,
         texts: List[str],
+        task: Optional[str] = None,
         normalize: bool = True,
         raise_on_error: bool = False,
     ) -> List[List[float]]:
         """
-        Embed a list of texts.
+        Embed a list of texts using Jina API.
         
         Args:
             texts: List of text strings to embed
+            task: Task type ('retrieval.query' or 'retrieval.passage')
+                  Defaults to retrieval.passage for documents
             normalize: Whether to L2 normalize embeddings
+            raise_on_error: Raise exception on API error
             
         Returns:
             List of embedding vectors
@@ -121,7 +109,13 @@ class MultimodalEmbedder:
         if not texts:
             return []
         
-        client = await self._get_client()
+        if not self.api_key:
+            logger.error("JINA_API_KEY not configured")
+            if raise_on_error:
+                raise ValueError("JINA_API_KEY not configured")
+            return [[0.0] * self.dimensions] * len(texts)
+        
+        task = task or self.task_passage
         all_embeddings = []
         
         # Process in batches
@@ -129,22 +123,25 @@ class MultimodalEmbedder:
             batch = texts[i:i + self.batch_size]
             
             try:
+                await self._rate_limit()
+                client = await self._get_client()
+                
+                # Build Jina-format input
+                input_data = [{"text": t} for t in batch]
+                
                 response = await client.post(
                     f"{self.api_base}/embeddings",
                     json={
                         "model": self.model,
-                        "input": batch,
-                        "encoding_format": "float",
+                        "task": task,
+                        "dimensions": self.dimensions,
+                        "input": input_data,
                     },
-                    headers={"Content-Type": "application/json"},
                 )
                 response.raise_for_status()
                 
                 data = response.json()
                 batch_embeddings = [item["embedding"] for item in data["data"]]
-                
-                # Apply Matryoshka truncation
-                batch_embeddings = [self._truncate_embedding(e) for e in batch_embeddings]
                 
                 if normalize:
                     batch_embeddings = [
@@ -154,18 +151,32 @@ class MultimodalEmbedder:
                 all_embeddings.extend(batch_embeddings)
                 
             except httpx.HTTPError as e:
-                logger.error(f"Embedding API error: {e}")
+                logger.error(f"Jina Embedding API error: {e}")
                 if raise_on_error:
                     raise
                 # Return zero embeddings for failed batch
-                all_embeddings.extend([[0.0] * self.dim_store] * len(batch))
+                all_embeddings.extend([[0.0] * self.dimensions] * len(batch))
         
         return all_embeddings
     
-    async def embed_text(self, text: str, normalize: bool = True) -> List[float]:
+    async def embed_text(
+        self,
+        text: str,
+        task: Optional[str] = None,
+        normalize: bool = True,
+    ) -> List[float]:
         """Embed a single text string."""
-        embeddings = await self.embed_texts([text], normalize=normalize)
-        return embeddings[0] if embeddings else [0.0] * self.dim_store
+        task = task or self.task_passage
+        embeddings = await self.embed_texts([text], task=task, normalize=normalize)
+        return embeddings[0] if embeddings else [0.0] * self.dimensions
+    
+    async def embed_query(self, query: str, normalize: bool = True) -> List[float]:
+        """
+        Embed a query string using query-specific task.
+        
+        Uses 'retrieval.query' task for optimal query embeddings.
+        """
+        return await self.embed_text(query, task=self.task_query, normalize=normalize)
     
     async def embed_images(
         self,
@@ -173,7 +184,7 @@ class MultimodalEmbedder:
         normalize: bool = True,
     ) -> List[List[float]]:
         """
-        Embed a list of images directly (multimodal).
+        Embed images directly using Jina multimodal API.
         
         Args:
             images: List of image bytes (PNG/JPEG)
@@ -185,40 +196,36 @@ class MultimodalEmbedder:
         if not images:
             return []
         
+        if not self.api_key:
+            logger.error("JINA_API_KEY not configured")
+            return [[0.0] * self.dimensions] * len(images)
+        
         if not self.config.rag_multimodal_embedding_enabled:
             logger.warning("Multimodal embeddings disabled, returning zero vectors")
-            return [[0.0] * self.dim_store] * len(images)
+            return [[0.0] * self.dimensions] * len(images)
         
-        client = await self._get_client()
         all_embeddings = []
         
         for image_bytes in images:
             try:
+                await self._rate_limit()
+                client = await self._get_client()
+                
                 # Encode image as base64
                 b64_image = base64.b64encode(image_bytes).decode("utf-8")
                 
-                # Use vision-compatible endpoint
                 response = await client.post(
                     f"{self.api_base}/embeddings",
                     json={
                         "model": self.model,
-                        "input": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{b64_image}"
-                                }
-                            }
-                        ],
-                        "encoding_format": "float",
+                        "dimensions": self.dimensions,
+                        "input": [{"image": b64_image}],
                     },
-                    headers={"Content-Type": "application/json"},
                 )
                 response.raise_for_status()
                 
                 data = response.json()
                 embedding = data["data"][0]["embedding"]
-                embedding = self._truncate_embedding(embedding)
                 
                 if normalize:
                     embedding = self._normalize(embedding)
@@ -226,15 +233,15 @@ class MultimodalEmbedder:
                 all_embeddings.append(embedding)
                 
             except httpx.HTTPError as e:
-                logger.error(f"Image embedding API error: {e}")
-                all_embeddings.append([0.0] * self.dim_store)
+                logger.error(f"Jina Image Embedding API error: {e}")
+                all_embeddings.append([0.0] * self.dimensions)
         
         return all_embeddings
     
     async def embed_image(self, image: bytes, normalize: bool = True) -> List[float]:
         """Embed a single image."""
         embeddings = await self.embed_images([image], normalize=normalize)
-        return embeddings[0] if embeddings else [0.0] * self.dim_store
+        return embeddings[0] if embeddings else [0.0] * self.dimensions
     
     async def embed_mixed(
         self,
@@ -243,50 +250,25 @@ class MultimodalEmbedder:
         normalize: bool = True,
     ) -> List[float]:
         """
-        Embed text and image together (joint representation).
+        Embed text and image together.
         
-        Uses multimodal model to create a unified embedding
-        that captures both textual and visual information.
+        Note: Jina API embeds each modality separately.
+        For joint representation, we average the embeddings.
         """
         if not self.config.rag_multimodal_embedding_enabled:
             return await self.embed_text(text, normalize=normalize)
         
-        client = await self._get_client()
+        # Get both embeddings
+        text_emb = await self.embed_text(text, normalize=False)
+        image_emb = await self.embed_image(image, normalize=False)
         
-        try:
-            b64_image = base64.b64encode(image).decode("utf-8")
-            
-            response = await client.post(
-                f"{self.api_base}/embeddings",
-                json={
-                    "model": self.model,
-                    "input": [
-                        {"type": "text", "text": text},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{b64_image}"
-                            }
-                        }
-                    ],
-                    "encoding_format": "float",
-                },
-                headers={"Content-Type": "application/json"},
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            embedding = data["data"][0]["embedding"]
-            embedding = self._truncate_embedding(embedding)
-            
-            if normalize:
-                embedding = self._normalize(embedding)
-            
-            return embedding
-            
-        except httpx.HTTPError as e:
-            logger.error(f"Mixed embedding API error: {e}")
-            return [0.0] * self.dim_store
+        # Average and normalize
+        combined = [(t + i) / 2 for t, i in zip(text_emb, image_emb)]
+        
+        if normalize:
+            combined = self._normalize(combined)
+        
+        return combined
     
     async def embed_chunks(
         self,
@@ -316,7 +298,7 @@ class MultimodalEmbedder:
         # Embed text chunks
         if text_chunks:
             texts = [c.text for c in text_chunks]
-            text_embeddings = await self.embed_texts(texts)
+            text_embeddings = await self.embed_texts(texts, task=self.task_passage)
             
             for chunk, embedding in zip(text_chunks, text_embeddings):
                 chunk.embedding = embedding
@@ -330,7 +312,7 @@ class MultimodalEmbedder:
                 chunk.image_embedding = embedding
                 # Also embed alt text if available
                 if chunk.text and chunk.text != "[Image]":
-                    chunk.embedding = await self.embed_text(chunk.text)
+                    chunk.embedding = await self.embed_text(chunk.text, task=self.task_passage)
         
         return chunks
     
@@ -368,6 +350,7 @@ class MultimodalEmbedder:
         session: aiohttp.ClientSession,
         batch: List[str],
         batch_index: int,
+        task: str,
     ) -> tuple[int, List[List[float]]]:
         """
         Embed a single batch using aiohttp (for concurrent processing).
@@ -376,47 +359,53 @@ class MultimodalEmbedder:
             Tuple of (batch_index, embeddings) for ordered reconstruction
         """
         try:
+            await self._rate_limit()
+            
+            input_data = [{"text": t} for t in batch]
+            
             async with session.post(
                 f"{self.api_base}/embeddings",
                 json={
                     "model": self.model,
-                    "input": batch,
-                    "encoding_format": "float",
+                    "task": task,
+                    "dimensions": self.dimensions,
+                    "input": input_data,
                 },
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    logger.error(f"Embedding batch {batch_index} failed: {error_text}")
-                    return (batch_index, [[0.0] * self.dim_store] * len(batch))
+                    logger.error(f"Jina embedding batch {batch_index} failed: {error_text}")
+                    return (batch_index, [[0.0] * self.dimensions] * len(batch))
                 
                 data = await response.json()
                 embeddings = [item["embedding"] for item in data["data"]]
-                
-                # Apply Matryoshka truncation and normalization
-                embeddings = [self._truncate_embedding(e) for e in embeddings]
                 embeddings = [self._normalize(e) for e in embeddings]
                 
                 return (batch_index, embeddings)
                 
         except Exception as e:
-            logger.error(f"Embedding batch {batch_index} error: {e}")
-            return (batch_index, [[0.0] * self.dim_store] * len(batch))
+            logger.error(f"Jina embedding batch {batch_index} error: {e}")
+            return (batch_index, [[0.0] * self.dimensions] * len(batch))
     
     async def embed_texts_concurrent(
         self,
         texts: List[str],
+        task: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[List[float]]:
         """
         Embed texts with concurrent batch processing using aiohttp.
         
-        OPTIMIZATION: Sends multiple batches in parallel to maximize GPU utilization.
-        Uses connection pooling for efficient HTTP handling.
+        Note: Respects Jina rate limits (500 RPM).
         
         Args:
             texts: List of text strings to embed
-            progress_callback: Optional callback(completed, total) for progress tracking
+            task: Task type for embeddings
+            progress_callback: Optional callback(completed, total) for progress
             
         Returns:
             List of embedding vectors (in same order as input)
@@ -424,7 +413,14 @@ class MultimodalEmbedder:
         if not texts:
             return []
         
-        concurrent_batches = self.config.rag_embed_concurrent_batches
+        if not self.api_key:
+            logger.error("JINA_API_KEY not configured")
+            return [[0.0] * self.dimensions] * len(texts)
+        
+        task = task or self.task_passage
+        
+        # Limit concurrency to respect rate limits (max 4 concurrent)
+        concurrent_batches = min(4, self.config.rag_embed_concurrent_batches)
         
         # Create batches
         batches: List[tuple[int, List[str]]] = []
@@ -434,11 +430,11 @@ class MultimodalEmbedder:
         
         total_batches = len(batches)
         logger.info(
-            f"Embedding {len(texts)} texts in {total_batches} batches "
+            f"Jina: Embedding {len(texts)} texts in {total_batches} batches "
             f"({concurrent_batches} concurrent)"
         )
         
-        # Connection pooling for efficiency
+        # Connection pooling
         connector = aiohttp.TCPConnector(limit=concurrent_batches * 2)
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         
@@ -449,27 +445,25 @@ class MultimodalEmbedder:
             connector=connector,
             timeout=timeout,
         ) as session:
-            # Process batches in groups of concurrent_batches
+            # Process batches in groups
             for group_start in range(0, total_batches, concurrent_batches):
                 group_end = min(group_start + concurrent_batches, total_batches)
                 current_group = batches[group_start:group_end]
                 
-                # Fire all concurrent requests
+                # Fire concurrent requests
                 tasks = [
-                    self._embed_batch_aiohttp(session, batch, idx)
+                    self._embed_batch_aiohttp(session, batch, idx, task)
                     for idx, batch in current_group
                 ]
                 
-                # Wait for group to complete
+                # Wait for group
                 group_results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                # Process results
                 for result in group_results:
                     if isinstance(result, BaseException):
                         logger.error(f"Batch failed with exception: {result}")
                         continue
-                    # Type-safe append after exception check
-                    all_results.append(result)  # type: ignore[arg-type]
+                    all_results.append(result)  # type: ignore
                 
                 completed += len(current_group)
                 if progress_callback:
@@ -491,8 +485,6 @@ class MultimodalEmbedder:
         """
         Embed chunks with concurrent batch processing.
         
-        OPTIMIZATION: Uses concurrent embedding for text chunks.
-        
         Args:
             chunks: List of ChildChunk objects
             progress_callback: Optional callback for progress tracking
@@ -513,12 +505,14 @@ class MultimodalEmbedder:
         # Embed text chunks concurrently
         if text_chunks:
             texts = [c.text for c in text_chunks]
-            text_embeddings = await self.embed_texts_concurrent(texts, progress_callback)
+            text_embeddings = await self.embed_texts_concurrent(
+                texts, task=self.task_passage, progress_callback=progress_callback
+            )
             
             for chunk, embedding in zip(text_chunks, text_embeddings):
                 chunk.embedding = embedding
         
-        # Embed image chunks (sequential, usually fewer)
+        # Embed image chunks (sequential due to rate limits)
         if image_chunks and self.config.rag_multimodal_embedding_enabled:
             images = [c.image_data for c in image_chunks]
             image_embeddings = await self.embed_images(images)

@@ -48,6 +48,71 @@ class RAGConfig(BaseSettings):
     openai_model: str = Field(default="gpt-5", description="Default OpenAI model")
     
     # ═══════════════════════════════════════════════════════════════════════════
+    # JINA AI API
+    # ═══════════════════════════════════════════════════════════════════════════
+    jina_api_key: str = Field(default="", description="Jina AI API key")
+    jina_api_base: str = Field(
+        default="https://api.jina.ai/v1",
+        description="Jina API base URL",
+    )
+    
+    # Jina Embedding
+    jina_embed_model: str = Field(
+        default="jina-embeddings-v4",
+        description="Jina embedding model",
+    )
+    jina_embed_dimensions: int = Field(
+        default=1024,
+        description="Output embedding dimensions (Matryoshka truncation)",
+    )
+    jina_embed_task_query: str = Field(
+        default="retrieval.query",
+        description="Task parameter for query embeddings",
+    )
+    jina_embed_task_passage: str = Field(
+        default="retrieval.passage",
+        description="Task parameter for document/passage embeddings",
+    )
+    jina_embed_batch_size: int = Field(
+        default=100,
+        description="Batch size for Jina embeddings",
+    )
+    jina_embed_timeout: float = Field(
+        default=60.0,
+        description="Jina embedding request timeout",
+    )
+    
+    # Jina Reranker
+    jina_rerank_model: str = Field(
+        default="jina-reranker-v3",
+        description="Jina reranker model",
+    )
+    jina_rerank_top_n: int = Field(
+        default=20,
+        description="Top N results to return from Jina reranker",
+    )
+    jina_rerank_timeout: float = Field(
+        default=30.0,
+        description="Jina reranker request timeout",
+    )
+    
+    # Provider Selection
+    rag_embed_provider: str = Field(
+        default="jina",
+        description="Embedding provider: 'jina' (cloud API) or 'local' (Qwen3-VL)",
+    )
+    rag_rerank_provider: str = Field(
+        default="jina",
+        description="Reranker provider: 'jina' (cloud API) or 'local' (Qwen3-VL)",
+    )
+    
+    # Image Ingestion Mode
+    rag_image_ingestion_mode: str = Field(
+        default="auto",
+        description="Image ingestion mode: 'ocr' (extract text), 'direct' (embed image), 'auto' (system decides)",
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
     # EMBEDDING API
     # ═══════════════════════════════════════════════════════════════════════════
     rag_embed_api_base: str = Field(

@@ -11,6 +11,7 @@ A production-ready Retrieval-Augmented Generation (RAG) library featuring triple
 ## ✨ What's New (Phase 1-6 Enhancements)
 
 ### 🧠 Advanced RAG Techniques
+
 - **HyDE (Hypothetical Document Embeddings)** - Bridge semantic gap with generated hypotheticals
 - **Self-RAG** - Self-reflective retrieval with relevance assessment
 - **Corrective RAG** - Dynamic knowledge refinement and correction
@@ -18,6 +19,7 @@ A production-ready Retrieval-Augmented Generation (RAG) library featuring triple
 - **Multi-Query Expansion** - RAG-Fusion with query variants
 
 ### ⚡ Performance & Infrastructure
+
 - **Semantic Chunking** - Boundary-aware document splitting
 - **Multi-Stage Reranking** - Progressive refinement pipeline
 - **Query Caching** - Semantic similarity-based cache
@@ -25,6 +27,7 @@ A production-ready Retrieval-Augmented Generation (RAG) library featuring triple
 - **Observability** - Prometheus metrics and tracing
 
 ### 🎯 Retrieval Enhancements
+
 - **SPLADE Sparse Retrieval** - Learned sparse representations
 - **ColBERT Late Interaction** - Token-level MaxSim scoring
 - **MMR Diversity** - Maximal Marginal Relevance optimization
@@ -32,6 +35,7 @@ A production-ready Retrieval-Augmented Generation (RAG) library featuring triple
 - **Adaptive Fusion** - Query-aware weight tuning
 
 ### 📊 Evaluation Framework
+
 - **LLM-as-Judge** - Automated quality evaluation
 - **RAGAS Metrics** - Faithfulness, relevance, coverage
 - **Retrieval Metrics** - Precision, recall, MRR, NDCG
@@ -39,22 +43,62 @@ A production-ready Retrieval-Augmented Generation (RAG) library featuring triple
 ## 🎯 Core Features
 
 ### Triple-Hybrid Search
+
 - **Lexical Search (BM25/FTS)**: PostgreSQL full-text search with ts_rank_cd
 - **Semantic Search (HNSW)**: Vector similarity using pgvector with 1024d embeddings
 - **Graph Search (Cypher)**: Knowledge graph traversal via PuppyGraph
 
 ### Multimodal Support
+
 - **Text Embeddings**: Qwen3-VL-Embedding-2B (Matryoshka: 2048d → 1024d)
 - **Image Embeddings**: Direct vision encoding for image retrieval
 - **Mixed Embeddings**: Joint text+image representations
 - **Table/Code Support**: Multi-vector retrieval for structured content
 
+### 🚀 Jina AI Integration (NEW)
+
+Triple-Hybrid-RAG now supports **Jina AI cloud API** as an alternative to local models:
+
+| Provider | Model | Use Case |
+|----------|-------|----------|
+| **jina-embeddings-v4** | 2048d multimodal | Text & image embeddings |
+| **jina-reranker-v3** | Listwise reranker | SOTA multilingual reranking |
+
+**Quick Setup:**
+
+```bash
+# 1. Get API key from https://jina.ai/?sui=apikey
+# 2. Set in .env:
+JINA_API_KEY=jina_your-key-here
+RAG_EMBED_PROVIDER=jina
+RAG_RERANK_PROVIDER=jina
+```
+
+**Features:**
+
+- ✅ Multimodal embeddings (text + images in same vector space)
+- ✅ Task-specific embeddings (`retrieval.query` vs `retrieval.passage`)
+- ✅ Matryoshka truncation (2048d → 1024d)
+- ✅ Rate limiting and retry logic
+- ✅ Switch between Jina (cloud) and local (Qwen3-VL) via config
+
+**Image Ingestion Modes:**
+
+```bash
+# In .env - choose how to process images
+RAG_IMAGE_INGESTION_MODE=auto    # System decides (recommended)
+RAG_IMAGE_INGESTION_MODE=ocr     # Extract text via OCR
+RAG_IMAGE_INGESTION_MODE=direct  # Embed image directly (multimodal)
+```
+
 ### Hierarchical Chunking
+
 - **Parent Chunks**: 800-1000 tokens for context (stored for LLM)
 - **Child Chunks**: ~200 tokens for retrieval (indexed with embeddings)
 - **Semantic Boundaries**: NLP-aware sentence and paragraph detection
 
 ### Knowledge Graph
+
 - **Entity Extraction**: GPT-5 NER/RE during ingestion
 - **Relation Mapping**: Typed edges between entities
 - **Cypher Queries**: Full graph traversal via PuppyGraph Bolt protocol
@@ -118,6 +162,7 @@ docker compose up -d
 ```
 
 This starts:
+
 - PostgreSQL + pgvector on port **54332**
 - PuppyGraph Bolt on port **7697**
 - PuppyGraph Web UI on port **8091**
@@ -397,6 +442,7 @@ Stage 11: Pipeline Demo     ✅
 A full-featured web dashboard for managing the RAG pipeline visually.
 
 ### Features
+
 - **📊 Metrics Dashboard**: Real-time stats, feature toggles, job monitoring
 - **⚙️ Configuration Panel**: Edit 54+ parameters by category, save to `.env`
 - **📁 File Ingestion**: Drag-drop upload with stage progress tracking
@@ -418,10 +464,12 @@ npm install && npm run dev
 ```
 
 ### Supported File Formats
+
 - **Documents**: PDF, DOCX, DOC, XLSX, XLS, CSV, TXT, MD
 - **Images**: PNG, JPG, JPEG, WEBP, TIFF, TIF, BMP
 
 ### API Endpoints
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/health` | Health check |
@@ -483,6 +531,7 @@ Built on these excellent technologies:
 - [tiktoken](https://github.com/openai/tiktoken) - Token counting
 
 Inspired by research:
+
 - [HyDE](https://arxiv.org/abs/2212.10496) - Hypothetical Document Embeddings
 - [Self-RAG](https://arxiv.org/abs/2310.11511) - Self-Reflective RAG
 - [RAG-Fusion](https://arxiv.org/abs/2402.03367) - Multi-query fusion

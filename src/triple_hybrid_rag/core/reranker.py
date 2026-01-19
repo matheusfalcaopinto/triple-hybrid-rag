@@ -17,6 +17,25 @@ from triple_hybrid_rag.config import RAGConfig, get_settings
 logger = logging.getLogger(__name__)
 
 
+def get_reranker(config: Optional[RAGConfig] = None):
+    """
+    Factory function to get the appropriate reranker based on configuration.
+    
+    Args:
+        config: Optional RAG configuration
+        
+    Returns:
+        JinaReranker if provider is 'jina', Reranker otherwise
+    """
+    config = config or get_settings()
+    
+    if config.rag_rerank_provider.lower() == "jina":
+        from triple_hybrid_rag.core.jina_reranker import JinaReranker
+        return JinaReranker(config)
+    
+    return Reranker(config)
+
+
 class Reranker:
     """
     Reranker client using a Qwen3-VL-Reranker OpenAI-compatible API.
