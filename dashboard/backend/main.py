@@ -38,10 +38,10 @@ from triple_hybrid_rag.config import RAGConfig, get_settings, reset_settings
 from triple_hybrid_rag.ingestion.loaders import DocumentLoader, FileType
 from triple_hybrid_rag.ingestion.ocr import OCRProcessor, OCRIngestionMode, resolve_ocr_mode
 from triple_hybrid_rag.core.chunker import HierarchicalChunker
-from triple_hybrid_rag.core.embedder import MultimodalEmbedder
+from triple_hybrid_rag.core.embedder import get_embedder
 from triple_hybrid_rag.core.entity_extractor import EntityRelationExtractor
 from triple_hybrid_rag.core.fusion import RRFFusion
-from triple_hybrid_rag.core.reranker import Reranker
+from triple_hybrid_rag.core.reranker import get_reranker
 from triple_hybrid_rag.types import SearchChannel, Modality, SearchResult
 
 app = FastAPI(
@@ -187,10 +187,19 @@ def get_config_metadata() -> Dict[str, Dict]:
         "rag_chunk_overlap_tokens": {"category": "Chunking", "type": "integer", "description": "Overlap between chunks", "min": 0, "max": 200},
         
         # Embedding
-        "rag_embed_api_base": {"category": "Embedding", "type": "string", "description": "Embedding API base URL"},
-        "rag_embed_model": {"category": "Embedding", "type": "string", "description": "Embedding model name"},
+        "rag_embed_api_base": {"category": "Embedding", "type": "string", "description": "Embedding API base URL (local)"},
+        "rag_embed_model": {"category": "Embedding", "type": "string", "description": "Embedding model name (local)"},
         "rag_embed_dim_store": {"category": "Embedding", "type": "integer", "description": "Storage embedding dimension", "min": 256, "max": 4096},
         "rag_embed_batch_size": {"category": "Embedding", "type": "integer", "description": "Batch size for embeddings", "min": 1, "max": 1000},
+        
+        # Jina AI Provider
+        "rag_embed_provider": {"category": "Jina AI", "type": "string", "description": "Embedding provider: jina or local"},
+        "rag_rerank_provider": {"category": "Jina AI", "type": "string", "description": "Reranker provider: jina or local"},
+        "jina_api_key": {"category": "Jina AI", "type": "string", "description": "Jina AI API key (from jina.ai)"},
+        "jina_embed_model": {"category": "Jina AI", "type": "string", "description": "Jina embedding model"},
+        "jina_embed_dimensions": {"category": "Jina AI", "type": "integer", "description": "Jina embedding dimensions", "min": 256, "max": 2048},
+        "jina_rerank_model": {"category": "Jina AI", "type": "string", "description": "Jina reranker model"},
+        "rag_image_ingestion_mode": {"category": "Jina AI", "type": "string", "description": "Image mode: ocr, direct, or auto"},
         
         # Database
         "database_url": {"category": "Database", "type": "string", "description": "PostgreSQL connection URL"},
@@ -424,7 +433,7 @@ async def run_ingestion(job_id: str, file_path: Path) -> None:
         stages[3].status = "running"
         job.updated_at = datetime.utcnow().isoformat()
         
-        embedder = MultimodalEmbedder(config=config)
+        embedder = get_embedder(config)
         texts = [chunk.text for chunk in child_chunks]
         
         try:
@@ -670,8 +679,12 @@ async def retrieve(request: QueryRequest):
         import asyncpg
         
         # Embed query
-        embedder = MultimodalEmbedder(config=config)
-        query_embedding = await embedder.embed_text(request.query)
+        embedder = get_embedder(config)
+        # Use query-specific embedding if Jina provider
+        if hasattr(embedder, 'embed_query'):
+            query_embedding = await embedder.embed_query(request.query)
+        else:
+            query_embedding = await embedder.embed_text(request.query)
         await embedder.close()
         
         pool = await asyncpg.create_pool(config.database_url, min_size=1, max_size=5)
@@ -763,7 +776,7 @@ async def retrieve(request: QueryRequest):
             
             # Reranking
             if config.rag_rerank_enabled and fused:
-                reranker = Reranker(config=config)
+                reranker = get_reranker(config)
                 documents = [r.text for r in fused]
                 scores = await reranker.rerank(request.query, documents)
                 await reranker.close()
