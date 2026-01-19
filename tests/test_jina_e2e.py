@@ -118,14 +118,31 @@ class TestJinaEmbedderE2E:
     @pytest.mark.asyncio
     async def test_embed_image(self, embedder):
         """Test embedding an image (requires multimodal support)."""
-        # Create a simple 1x1 pixel PNG
-        import base64
+        import os
         
-        # Minimal valid PNG (1x1 white pixel)
-        png_b64 = (
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-        )
-        image_bytes = base64.b64decode(png_b64)
+        # Use real test images from data folder
+        test_images = [
+            "data/ralph_playbook.png",
+            "data/Gemini_Generated_Image_tqobyutqobyutqob.png",
+            "data/WhatsApp Image 2025-09-20 at 23.03.11.jpeg",
+        ]
+        
+        # Find first available test image
+        image_path = None
+        for img in test_images:
+            full_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), img)
+            if os.path.exists(full_path):
+                image_path = full_path
+                break
+        
+        if not image_path:
+            pytest.skip("No test images found in data/ folder")
+        
+        # Read image bytes
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+        
+        print(f"Testing with image: {os.path.basename(image_path)} ({len(image_bytes)} bytes)")
         
         result = await embedder.embed_image(image_bytes)
         
