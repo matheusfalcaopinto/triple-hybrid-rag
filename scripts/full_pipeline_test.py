@@ -58,10 +58,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from triple_hybrid_rag.config import get_settings, reset_settings
 from triple_hybrid_rag.core.chunker import HierarchicalChunker
-from triple_hybrid_rag.core.embedder import MultimodalEmbedder
+from triple_hybrid_rag.core.embedder import get_embedder, MultimodalEmbedder
 from triple_hybrid_rag.core.entity_extractor import EntityRelationExtractor
 from triple_hybrid_rag.core.fusion import RRFFusion
-from triple_hybrid_rag.core.reranker import Reranker
+from triple_hybrid_rag.core.reranker import get_reranker, Reranker
 from triple_hybrid_rag.types import ChildChunk, SearchResult, SearchChannel, Modality
 
 # Console for rich output
@@ -209,9 +209,27 @@ def print_config(config):
     config_table.add_column("Value", style="green")
 
     config_table.add_row("Database", config.database_url[:50] + "...")
-    config_table.add_row("Embed API", config.rag_embed_api_base)
-    config_table.add_row("Embed Model", config.rag_embed_model)
-    config_table.add_row("Rerank API", config.rag_rerank_api_base)
+    
+    # Show Jina or local embedding provider
+    embed_provider = getattr(config, 'rag_embed_provider', 'local')
+    rerank_provider = getattr(config, 'rag_rerank_provider', 'local')
+    
+    if embed_provider.lower() == 'jina':
+        config_table.add_row("Embed Provider", "[cyan]Jina AI (Cloud)[/cyan]")
+        config_table.add_row("Embed Model", getattr(config, 'jina_embed_model', 'jina-embeddings-v4'))
+        config_table.add_row("Embed Dimensions", str(getattr(config, 'jina_embed_dimensions', 1024)))
+    else:
+        config_table.add_row("Embed Provider", "[yellow]Local (vLLM/Ollama)[/yellow]")
+        config_table.add_row("Embed API", config.rag_embed_api_base)
+        config_table.add_row("Embed Model", config.rag_embed_model)
+    
+    if rerank_provider.lower() == 'jina':
+        config_table.add_row("Rerank Provider", "[cyan]Jina AI (Cloud)[/cyan]")
+        config_table.add_row("Rerank Model", getattr(config, 'jina_rerank_model', 'jina-reranker-v3'))
+    else:
+        config_table.add_row("Rerank Provider", "[yellow]Local (vLLM/Ollama)[/yellow]")
+        config_table.add_row("Rerank API", config.rag_rerank_api_base)
+    
     config_table.add_row("OpenAI Model", config.openai_model)
     config_table.add_row("PuppyGraph", config.puppygraph_bolt_url)
     config_table.add_row("Graph Enabled", str(config.rag_graph_enabled))
@@ -263,10 +281,12 @@ async def stage_chunking(config, tracker: PipelineTracker) -> Tuple[list, list]:
     return parent_chunks, child_chunks
 
 async def stage_embedding(config, child_chunks: list, tracker: PipelineTracker) -> list:
-    """Stage 2: Embedding via vLLM."""
-    console.print("[bold cyan]━━━ Stage 2: Embedding[/bold cyan]")
+    """Stage 2: Embedding (Jina AI or vLLM)."""
+    embed_provider = getattr(config, 'rag_embed_provider', 'local')
+    provider_label = "[cyan]Jina AI[/cyan]" if embed_provider.lower() == 'jina' else "[yellow]vLLM[/yellow]"
+    console.print(f"[bold cyan]━━━ Stage 2: Embedding ({provider_label})[/bold cyan]")
 
-    embedder = MultimodalEmbedder(config=config)
+    embedder = get_embedder(config)
     texts = [c.text for c in child_chunks]
 
     with create_progress() as progress:
@@ -641,8 +661,12 @@ async def stage_retrieval(config, child_chunks: list, query: str, tracker: Pipel
     """Stage 7: Triple-Hybrid Retrieval."""
     console.print("[bold cyan]━━━ Stage 7: Retrieval (Lexical + Semantic + Graph)[/bold cyan]")
 
-    embedder = MultimodalEmbedder(config=config)
-    query_embedding = await embedder.embed_text(query)
+    embedder = get_embedder(config)
+    # Use query-specific embedding if Jina
+    if hasattr(embedder, 'embed_query'):
+        query_embedding = await embedder.embed_query(query)
+    else:
+        query_embedding = await embedder.embed_text(query)
     await embedder.close()
 
     semantic_results, lexical_results, graph_results = [], [], []
