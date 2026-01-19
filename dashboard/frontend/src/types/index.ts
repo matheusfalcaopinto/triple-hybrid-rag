@@ -42,9 +42,9 @@ export interface SearchResult {
     semantic_score: number;
     graph_score: number;
     rrf_score: number;
-    rerank_score: number;
+    rerank_score?: number;
     final_score: number;
-    metadata: Record<string, any>;
+    metadata: Record<string, unknown>;
 }
 
 export interface RetrievalResponse {
@@ -71,7 +71,9 @@ export interface Document {
     title?: string;
     status: string;
     chunk_count: number;
-    created_at: string;
+    created_at?: string;
+    has_file?: boolean;
+    download_url?: string;
 }
 
 export interface Entity {

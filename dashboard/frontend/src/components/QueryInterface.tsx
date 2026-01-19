@@ -1,6 +1,5 @@
 import { useState, useCallback } from 'react';
-import { useRetrieval } from '../hooks/useApi';
-import type { SearchResult } from '../types';
+import { useRetrieval, type SearchResult } from '../hooks/useApi';
 
 export function QueryInterface() {
     const [query, setQuery] = useState('');
@@ -76,7 +75,7 @@ export function QueryInterface() {
                 <div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
                         <h3>Results ({data.total_results})</h3>
-                        {data.query_plan && (
+                        {data.query_plan != null && (
                             <span className="badge badge-info">Query Plan Available</span>
                         )}
                     </div>

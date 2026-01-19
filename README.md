@@ -392,8 +392,52 @@ Stage 10: Diversity Opt     ✅
 Stage 11: Pipeline Demo     ✅
 ```
 
+## 🖥️ Web Dashboard
+
+A full-featured web dashboard for managing the RAG pipeline visually.
+
+### Features
+- **📊 Metrics Dashboard**: Real-time stats, feature toggles, job monitoring
+- **⚙️ Configuration Panel**: Edit 54+ parameters by category, save to `.env`
+- **📁 File Ingestion**: Drag-drop upload with stage progress tracking
+- **🔍 Query Interface**: Triple-hybrid search with score breakdown
+- **🗃️ Database Browser**: Document management with delete/download
+- **🔗 Graph Viewer**: Embedded PuppyGraph Web UI
+
+### Quick Start
+
+```bash
+# 1. Start backend (port 8009)
+uv run python -m dashboard.backend.main
+
+# 2. Start frontend (port 5173)
+cd dashboard/frontend
+npm install && npm run dev
+
+# 3. Open http://localhost:5173
+```
+
+### Supported File Formats
+- **Documents**: PDF, DOCX, DOC, XLSX, XLS, CSV, TXT, MD
+- **Images**: PNG, JPG, JPEG, WEBP, TIFF, TIF, BMP
+
+### API Endpoints
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/health` | Health check |
+| `GET/POST /api/config` | Configuration management |
+| `POST /api/ingest/upload` | File upload |
+| `GET /api/ingest/status/{id}` | Ingestion progress |
+| `POST /api/retrieve` | Triple-hybrid search |
+| `GET /api/database/stats` | Database statistics |
+| `DELETE /api/database/documents/{id}` | Delete with cascade |
+| `GET /api/documents/{id}/download` | Download original file |
+
+📖 See [Dashboard README](dashboard/README.md) for full documentation.
+
 ## 📚 Documentation
 
+- [Dashboard Guide](dashboard/README.md) - Web dashboard setup and API reference
 - [Enhancement Guide](docs/ENHANCEMENT_GUIDE.md) - Detailed feature documentation
 - [Architecture](docs/ARCHITECTURE.md) - System design
 - [Benchmark Results](docs/BENCHMARK_RESULTS.md) - Performance data

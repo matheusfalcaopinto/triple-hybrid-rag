@@ -4,8 +4,19 @@
 
 import { useState, useCallback } from 'react';
 
-// Backend runs on port 8009
-const API_BASE = 'http://localhost:8009/api';
+// Dynamic API base URL - uses the same host as the frontend
+// When using Vite proxy, use relative path; otherwise use the full URL
+const getApiBase = () => {
+  // In development with Vite proxy, use relative path
+  if (import.meta.env.DEV) {
+    return '/api';
+  }
+  // In production, use HTTPS (same protocol as frontend)
+  const hostname = window.location.hostname;
+  return `https://${hostname}:8009/api`;
+};
+
+const API_BASE = getApiBase();
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -84,6 +95,8 @@ export interface Document {
     status: string;
     chunk_count: number;
     created_at: string;
+    has_file?: boolean;
+    download_url?: string;
 }
 
 export interface Entity {
@@ -91,6 +104,77 @@ export interface Entity {
     name: string;
     entity_type: string;
     mention_count: number;
+}
+
+export interface ChunkDetail {
+    id: string;
+    parent_id?: string;
+    index: number;
+    text: string;
+    token_count: number;
+    page?: number;
+    modality?: string;
+}
+
+export interface ParentChunkDetail {
+    id: string;
+    index: number;
+    text: string;
+    token_count: number;
+    page_start?: number;
+    section_heading?: string;
+}
+
+export interface EntityMention {
+    chunk_id: string;
+    start_char?: number;
+    end_char?: number;
+    confidence?: number;
+}
+
+export interface EntityDetail {
+    id: string;
+    name: string;
+    entity_type: string;
+    mentions: EntityMention[];
+}
+
+export interface RelationDetail {
+    id: string;
+    source: {
+        id: string;
+        name: string;
+        type: string;
+    };
+    target: {
+        id: string;
+        name: string;
+        type: string;
+    };
+    relation_type: string;
+    confidence?: number;
+}
+
+export interface DocumentDetails {
+    document: {
+        id: string;
+        tenant_id: string;
+        file_name: string;
+        collection: string;
+        title: string;
+        status: string;
+        created_at: string;
+    };
+    parent_chunks: ParentChunkDetail[];
+    child_chunks: ChunkDetail[];
+    entities: EntityDetail[];
+    relations: RelationDetail[];
+    stats: {
+        parent_chunks: number;
+        child_chunks: number;
+        entities: number;
+        relations: number;
+    };
 }
 
 export interface ConfigItem {
@@ -311,11 +395,36 @@ export function useDatabase() {
         }
     }, []);
 
+    const deleteDocument = useCallback(async (documentId: string): Promise<{ status: string; error?: string } | null> => {
+        try {
+            return await fetchApi<{ status: string; error?: string }>(
+                `/database/documents/${documentId}`,
+                { method: 'DELETE' }
+            );
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Delete failed';
+            return { status: 'error', error: message };
+        }
+    }, []);
+
+    const getDocumentDetails = useCallback(async (documentId: string): Promise<DocumentDetails | null> => {
+        setLoading(true);
+        try {
+            return await fetchApi<DocumentDetails>(`/database/documents/${documentId}/details`);
+        } catch {
+            return null;
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
     return {
         loading,
         getStats,
         listDocuments,
         listEntities,
+        deleteDocument,
+        getDocumentDetails,
     };
 }
 

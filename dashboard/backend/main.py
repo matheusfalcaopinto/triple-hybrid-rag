@@ -12,7 +12,7 @@ FastAPI backend for the RAG dashboard supporting:
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 from typing import Dict, List, Any, Optional
 from pathlib import Path
@@ -50,10 +50,10 @@ app = FastAPI(
     version="2.0.0",
 )
 
-# CORS for frontend
+# CORS for frontend - Allow all origins for local network HTTPS access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=["*"],  # Allow all origins for local network access
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -273,8 +273,13 @@ async def reload_config():
 # INGESTION - Multimodal Pipeline
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Persistent document storage
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "rag-uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+# Persistent storage for original files (not temp)
+DOCUMENT_STORAGE_DIR = PROJECT_ROOT / "storage" / "documents"
+DOCUMENT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 def _vector_literal(values: List[float]) -> str:
     """Convert embedding to PostgreSQL vector literal."""
@@ -576,10 +581,17 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
             detail=f"Unsupported file type: {suffix}. Supported: {', '.join(supported)}"
         )
     
-    # Save file
-    file_path = UPLOAD_DIR / f"{uuid.uuid4()}_{file.filename}"
+    # Generate unique filename (preserve original name with UUID prefix)
+    unique_filename = f"{uuid.uuid4()}_{file.filename}"
+    
+    # Save to temp upload dir for processing
+    file_path = UPLOAD_DIR / unique_filename
     with open(file_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
+    
+    # Also copy to persistent storage for later download
+    persistent_path = DOCUMENT_STORAGE_DIR / unique_filename
+    shutil.copy2(file_path, persistent_path)
     
     # Detect file type for job
     from triple_hybrid_rag.ingestion.loaders import detect_file_type
@@ -590,7 +602,7 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
     job = IngestionJob(
         job_id=job_id,
         status="pending",
-        file_name=file.filename,
+        file_name=unique_filename,  # Store unique filename for later retrieval
         file_type=file_type.value,
         progress=0.0,
         stages=[],
@@ -602,7 +614,7 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
     # Start background ingestion
     background_tasks.add_task(run_ingestion, job_id, file_path)
     
-    return {"job_id": job_id, "status": "pending", "file_type": file_type.value}
+    return {"job_id": job_id, "status": "pending", "file_type": file_type.value, "file_name": file.filename}
 
 @app.get("/api/ingest/status/{job_id}")
 async def get_ingestion_status(job_id: str):
@@ -869,6 +881,13 @@ async def list_documents(limit: int = 50, offset: int = 0):
         
         await conn.close()
         
+        def check_file_available(file_name: str) -> bool:
+            """Check if file is available for download."""
+            if not file_name:
+                return False
+            stored_file = DOCUMENT_STORAGE_DIR / file_name
+            return stored_file.exists()
+        
         return {
             "documents": [
                 {
@@ -880,12 +899,360 @@ async def list_documents(limit: int = 50, offset: int = 0):
                     "status": row["ingestion_status"],
                     "chunk_count": row["chunk_count"] or 0,
                     "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                    "has_file": check_file_available(row["file_name"]),
+                    "download_url": f"/api/documents/{row['id']}/download" if row["file_name"] else None,
                 }
                 for row in rows
             ]
         }
     except Exception as e:
         return {"documents": [], "error": str(e)}
+
+@app.delete("/api/database/documents/{document_id}")
+async def delete_document(document_id: str):
+    """
+    Delete a document and all related data (cascade delete).
+    
+    Deletes:
+    - Document record
+    - All parent chunks
+    - All child chunks (with embeddings)
+    - All entity mentions linked to those chunks
+    - All relations linked to those entities (if no other mentions)
+    - The stored original file (if exists)
+    """
+    import asyncpg
+    config = get_settings()
+    
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID format")
+    
+    try:
+        conn = await asyncpg.connect(config.database_url)
+        
+        # Get document info first (for file path)
+        doc = await conn.fetchrow(
+            "SELECT file_name, file_path FROM rag_documents WHERE id = $1",
+            doc_uuid
+        )
+        
+        if not doc:
+            await conn.close()
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Get all child chunk IDs for this document
+        chunk_ids = await conn.fetch(
+            "SELECT id FROM rag_child_chunks WHERE document_id = $1",
+            doc_uuid
+        )
+        chunk_id_list = [row['id'] for row in chunk_ids]
+        
+        # Delete entity mentions for these chunks
+        if chunk_id_list:
+            await conn.execute(
+                "DELETE FROM rag_entity_mentions WHERE child_chunk_id = ANY($1::uuid[])",
+                chunk_id_list
+            )
+        
+        # Delete child chunks
+        result = await conn.execute(
+            "DELETE FROM rag_child_chunks WHERE document_id = $1",
+            doc_uuid
+        )
+        deleted_children = int(result.split()[-1]) if result else 0
+        
+        # Delete parent chunks
+        result = await conn.execute(
+            "DELETE FROM rag_parent_chunks WHERE document_id = $1",
+            doc_uuid
+        )
+        deleted_parents = int(result.split()[-1]) if result else 0
+        
+        # Delete document
+        await conn.execute(
+            "DELETE FROM rag_documents WHERE id = $1",
+            doc_uuid
+        )
+        
+        # Clean up orphaned entities (entities with no mentions)
+        result = await conn.execute("""
+            DELETE FROM rag_entities e
+            WHERE NOT EXISTS (
+                SELECT 1 FROM rag_entity_mentions m WHERE m.entity_id = e.id
+            )
+        """)
+        deleted_entities = int(result.split()[-1]) if result else 0
+        
+        await conn.close()
+        
+        # Delete stored file if exists
+        file_deleted = False
+        if doc['file_name']:
+            # Check in persistent storage
+            stored_file = DOCUMENT_STORAGE_DIR / doc['file_name']
+            if stored_file.exists():
+                stored_file.unlink()
+                file_deleted = True
+            
+            # Also check temp upload dir
+            if doc['file_path']:
+                temp_file = Path(doc['file_path'])
+                if temp_file.exists():
+                    temp_file.unlink()
+                    file_deleted = True
+        
+        return {
+            "status": "deleted",
+            "document_id": document_id,
+            "deleted": {
+                "parent_chunks": deleted_parents or 0,
+                "child_chunks": deleted_children or 0,
+                "orphaned_entities": deleted_entities or 0,
+                "file_deleted": file_deleted,
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/database/documents/batch")
+async def delete_documents_batch(document_ids: List[str]):
+    """Delete multiple documents by ID."""
+    results = []
+    for doc_id in document_ids:
+        try:
+            result = await delete_document(doc_id)
+            results.append({"id": doc_id, "status": "deleted"})
+        except HTTPException as e:
+            results.append({"id": doc_id, "status": "error", "error": e.detail})
+        except Exception as e:
+            results.append({"id": doc_id, "status": "error", "error": str(e)})
+    
+    return {"results": results}
+
+
+@app.get("/api/documents/{document_id}/download")
+async def download_document(document_id: str):
+    """Download the original uploaded document."""
+    import asyncpg
+    config = get_settings()
+    
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID format")
+    
+    try:
+        conn = await asyncpg.connect(config.database_url)
+        
+        doc = await conn.fetchrow(
+            "SELECT file_name, file_path FROM rag_documents WHERE id = $1",
+            doc_uuid
+        )
+        await conn.close()
+        
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Check persistent storage first
+        if doc['file_name']:
+            stored_file = DOCUMENT_STORAGE_DIR / doc['file_name']
+            if stored_file.exists():
+                return FileResponse(
+                    path=str(stored_file),
+                    filename=doc['file_name'],
+                    media_type="application/octet-stream"
+                )
+        
+        # Check temp upload path
+        if doc['file_path']:
+            temp_file = Path(doc['file_path'])
+            if temp_file.exists():
+                return FileResponse(
+                    path=str(temp_file),
+                    filename=doc['file_name'] or temp_file.name,
+                    media_type="application/octet-stream"
+                )
+        
+        raise HTTPException(status_code=404, detail="Document file not found on disk")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/database/documents/{document_id}/details")
+async def get_document_details(document_id: str):
+    """
+    Get complete document details including all chunks, entities, and relations.
+    Used for visual validation of ingestion.
+    """
+    import asyncpg
+    config = get_settings()
+    
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid document ID format")
+    
+    try:
+        conn = await asyncpg.connect(config.database_url)
+        
+        # Get document info
+        doc = await conn.fetchrow("""
+            SELECT id, tenant_id, file_name, collection, title, 
+                   ingestion_status, created_at, updated_at
+            FROM rag_documents WHERE id = $1
+        """, doc_uuid)
+        
+        if not doc:
+            await conn.close()
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Get parent chunks
+        parent_chunks = await conn.fetch("""
+            SELECT id, index_in_document, text, token_count, page_start, section_heading
+            FROM rag_parent_chunks 
+            WHERE document_id = $1 
+            ORDER BY index_in_document
+        """, doc_uuid)
+        
+        # Get child chunks
+        child_chunks = await conn.fetch("""
+            SELECT c.id, c.parent_id, c.index_in_parent, c.text, c.token_count, 
+                   c.page, c.modality, c.content_hash
+            FROM rag_child_chunks c
+            WHERE c.document_id = $1 
+            ORDER BY c.page, c.index_in_parent
+        """, doc_uuid)
+        
+        # Get entity mentions for this document's chunks
+        chunk_ids = [row['id'] for row in child_chunks]
+        entities_data = []
+        relations_data = []
+        
+        if chunk_ids:
+            # Get entities with their mentions in this document
+            entities_rows = await conn.fetch("""
+                SELECT DISTINCT e.id, e.name, e.entity_type, 
+                       m.child_chunk_id, m.char_start, m.char_end, m.confidence
+                FROM rag_entities e
+                JOIN rag_entity_mentions m ON m.entity_id = e.id
+                WHERE m.child_chunk_id = ANY($1::uuid[])
+                ORDER BY e.entity_type, e.name
+            """, chunk_ids)
+            
+            # Group entities
+            entity_map = {}
+            for row in entities_rows:
+                eid = str(row['id'])
+                if eid not in entity_map:
+                    entity_map[eid] = {
+                        'id': eid,
+                        'name': row['name'],
+                        'entity_type': row['entity_type'],
+                        'mentions': []
+                    }
+                entity_map[eid]['mentions'].append({
+                    'chunk_id': str(row['child_chunk_id']),
+                    'start_char': row['char_start'],
+                    'end_char': row['char_end'],
+                    'confidence': float(row['confidence']) if row['confidence'] else None
+                })
+            entities_data = list(entity_map.values())
+            
+            # Get relations between entities in this document
+            entity_ids = [uuid.UUID(eid) for eid in entity_map.keys()]
+            if entity_ids:
+                relations_rows = await conn.fetch("""
+                    SELECT r.id, r.subject_entity_id, r.object_entity_id, 
+                           r.relation_type, r.confidence,
+                           se.name as source_name, se.entity_type as source_type,
+                           te.name as target_name, te.entity_type as target_type
+                    FROM rag_relations r
+                    JOIN rag_entities se ON se.id = r.subject_entity_id
+                    JOIN rag_entities te ON te.id = r.object_entity_id
+                    WHERE r.subject_entity_id = ANY($1::uuid[]) 
+                       OR r.object_entity_id = ANY($1::uuid[])
+                    ORDER BY r.relation_type
+                """, entity_ids)
+                
+                relations_data = [
+                    {
+                        'id': str(row['id']),
+                        'source': {
+                            'id': str(row['subject_entity_id']),
+                            'name': row['source_name'],
+                            'type': row['source_type']
+                        },
+                        'target': {
+                            'id': str(row['object_entity_id']),
+                            'name': row['target_name'],
+                            'type': row['target_type']
+                        },
+                        'relation_type': row['relation_type'],
+                        'confidence': float(row['confidence']) if row['confidence'] else None
+                    }
+                    for row in relations_rows
+                ]
+        
+        await conn.close()
+        
+        return {
+            'document': {
+                'id': str(doc['id']),
+                'tenant_id': doc['tenant_id'],
+                'file_name': doc['file_name'],
+                'collection': doc['collection'],
+                'title': doc['title'],
+                'status': doc['ingestion_status'],
+                'created_at': doc['created_at'].isoformat() if doc['created_at'] else None,
+            },
+            'parent_chunks': [
+                {
+                    'id': str(row['id']),
+                    'index': row['index_in_document'],
+                    'text': row['text'],
+                    'token_count': row['token_count'],
+                    'page_start': row['page_start'],
+                    'section_heading': row['section_heading'],
+                }
+                for row in parent_chunks
+            ],
+            'child_chunks': [
+                {
+                    'id': str(row['id']),
+                    'parent_id': str(row['parent_id']) if row['parent_id'] else None,
+                    'index': row['index_in_parent'],
+                    'text': row['text'],
+                    'token_count': row['token_count'],
+                    'page': row['page'],
+                    'modality': row['modality'],
+                }
+                for row in child_chunks
+            ],
+            'entities': entities_data,
+            'relations': relations_data,
+            'stats': {
+                'parent_chunks': len(parent_chunks),
+                'child_chunks': len(child_chunks),
+                'entities': len(entities_data),
+                'relations': len(relations_data),
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/database/entities")
 async def list_entities(limit: int = 50, offset: int = 0, entity_type: Optional[str] = None):
@@ -948,6 +1315,9 @@ async def get_metrics():
     # Get database stats
     stats = await get_database_stats()
     
+    # OCR is enabled if rag_ocr_enabled=True AND mode is not "off"
+    ocr_effectively_enabled = config.rag_ocr_enabled and config.rag_ocr_mode.lower() != "off"
+    
     return {
         "database": stats,
         "config": {
@@ -959,7 +1329,7 @@ async def get_metrics():
             "hyde_enabled": config.rag_hyde_enabled,
             "query_expansion_enabled": config.rag_query_expansion_enabled,
             "diversity_enabled": config.rag_diversity_enabled,
-            "ocr_enabled": config.rag_ocr_enabled,
+            "ocr_enabled": ocr_effectively_enabled,
             "ocr_mode": config.rag_ocr_mode,
         },
         "ingestion_jobs": {
@@ -977,4 +1347,24 @@ async def get_metrics():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8009)
+    from pathlib import Path
+    
+    # SSL certificate paths
+    certs_dir = Path(__file__).parent.parent / "certs"
+    ssl_keyfile = certs_dir / "key.pem"
+    ssl_certfile = certs_dir / "cert.pem"
+    
+    # Check if SSL certificates exist
+    if ssl_keyfile.exists() and ssl_certfile.exists():
+        print(f"🔒 Starting HTTPS server with certificates from {certs_dir}")
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=8009,
+            ssl_keyfile=str(ssl_keyfile),
+            ssl_certfile=str(ssl_certfile),
+        )
+    else:
+        print("⚠️  SSL certificates not found, starting HTTP server")
+        print(f"   Generate certificates in {certs_dir} for HTTPS support")
+        uvicorn.run(app, host="0.0.0.0", port=8009)
