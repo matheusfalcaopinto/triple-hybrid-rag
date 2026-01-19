@@ -2,14 +2,20 @@
 """
 End-to-End Performance Benchmark for Triple-Hybrid-RAG
 
-Tests the full ingestion pipeline with real API calls:
+Tests the full ingestion and retrieval pipeline with real API calls:
 - Chunking (parent/child creation)
 - Actual embedding via vLLM/Ollama API
 - Embedding cache effectiveness
 - Full pipeline throughput
+- NEW: HyDE generation (with real LLM)
+- NEW: Query expansion (with real LLM)
+- NEW: Multi-stage reranking
+- NEW: Diversity optimization
+- NEW: Full retrieval pipeline
 
 Requirements:
     - vLLM/Ollama running on RAG_EMBED_API_BASE (default: http://127.0.0.1:1234/v1)
+    - OpenAI API key for HyDE/Query Expansion
     - Environment configured in .env
 
 Usage:
@@ -72,22 +78,22 @@ class E2EBenchmarkSuite:
 
     def print_summary(self):
         """Print a formatted summary of results."""
-        print("\n" + "=" * 70)
-        print("E2E BENCHMARK RESULTS")
-        print("=" * 70)
+        print("\n" + "=" * 80)
+        print("E2E BENCHMARK RESULTS (Enhanced Pipeline)")
+        print("=" * 80)
         print(f"Timestamp: {self.timestamp}")
         print(f"Total Duration: {self.total_duration_seconds:.2f}s")
-        print("-" * 70)
-        print(f"{'Benchmark':<40} {'Rate':>12} {'Duration':>10} {'Memory':>8}")
-        print("-" * 70)
+        print("-" * 80)
+        print(f"{'Benchmark':<45} {'Rate':>12} {'Duration':>10} {'Memory':>8}")
+        print("-" * 80)
         
         for result in self.results:
             rate_str = f"{result.rate_per_second:,.1f}/s"
             dur_str = f"{result.duration_seconds:.3f}s"
             mem_str = f"{result.memory_mb:.1f}MB" if result.memory_mb > 0 else "N/A"
-            print(f"{result.name:<40} {rate_str:>12} {dur_str:>10} {mem_str:>8}")
+            print(f"{result.name:<45} {rate_str:>12} {dur_str:>10} {mem_str:>8}")
         
-        print("=" * 70)
+        print("=" * 80)
         
         if self.cache_stats:
             print("\nCache Statistics:")
@@ -151,6 +157,11 @@ def get_config_info(config: RAGConfig) -> Dict[str, Any]:
         "cache_enabled": config.rag_embedding_cache_enabled,
         "cache_backend": config.rag_embedding_cache_backend,
         "pipeline_enabled": config.rag_pipeline_enabled,
+        # Phase 1-6 enhancements
+        "hyde_enabled": getattr(config, 'rag_hyde_enabled', False),
+        "query_expansion_enabled": getattr(config, 'rag_query_expansion_enabled', False),
+        "multistage_rerank_enabled": getattr(config, 'rag_multistage_rerank_enabled', False),
+        "diversity_enabled": getattr(config, 'rag_diversity_enabled', False),
     }
 
 def measure_memory() -> float:
@@ -183,7 +194,7 @@ class E2EBenchmarker:
         tracemalloc.stop()
         
         result = BenchmarkResult(
-            name="chunking",
+            name="1. Chunking",
             duration_seconds=duration,
             items_processed=len(child_chunks),
             rate_per_second=len(child_chunks) / duration if duration > 0 else 0,
@@ -238,7 +249,7 @@ class E2EBenchmarker:
         tracemalloc.stop()
         
         return BenchmarkResult(
-            name=f"embedding_real{'_cached' if use_cache else ''}",
+            name=f"2. Embedding{'_cached' if use_cache else ''}",
             duration_seconds=duration,
             items_processed=len(texts),
             rate_per_second=len(texts) / duration if duration > 0 else 0,
@@ -305,7 +316,7 @@ class E2EBenchmarker:
         final_stats = self.cache.stats
         
         return BenchmarkResult(
-            name="embedding_cache_effectiveness",
+            name="3. Cache Effectiveness",
             duration_seconds=duration,
             items_processed=len(all_texts) * 2,  # Two passes
             rate_per_second=(len(all_texts) * 2) / duration if duration > 0 else 0,
@@ -336,7 +347,7 @@ class E2EBenchmarker:
         duration_seq = time.perf_counter() - start_seq
         
         result_seq = BenchmarkResult(
-            name="embedding_sequential",
+            name="4a. Embedding (Sequential)",
             duration_seconds=duration_seq,
             items_processed=len(texts),
             rate_per_second=len(texts) / duration_seq if duration_seq > 0 else 0,
@@ -352,7 +363,7 @@ class E2EBenchmarker:
         duration_conc = time.perf_counter() - start_conc
         
         result_conc = BenchmarkResult(
-            name="embedding_concurrent",
+            name="4b. Embedding (Concurrent)",
             duration_seconds=duration_conc,
             items_processed=len(texts),
             rate_per_second=len(texts) / duration_conc if duration_conc > 0 else 0,
@@ -364,15 +375,279 @@ class E2EBenchmarker:
         
         return result_seq, result_conc
     
+    async def benchmark_hyde_generation(self, num_queries: int = 5) -> BenchmarkResult:
+        """Benchmark HyDE generation with real LLM calls."""
+        from triple_hybrid_rag.retrieval.hyde import HyDEGenerator, HyDEConfig
+        
+        queries = [
+            "What is the refund policy for damaged items?",
+            "How do I configure the database connection settings?",
+            "Explain the machine learning algorithm implementation",
+            "Who is the lead architect of this project?",
+            "What are the performance optimization techniques?",
+        ]
+        
+        hyde_enabled = getattr(self.config, 'rag_hyde_enabled', False)
+        if not hyde_enabled or not self.config.openai_api_key:
+            return BenchmarkResult(
+                name="5. HyDE Generation",
+                duration_seconds=0,
+                items_processed=0,
+                rate_per_second=0,
+                metadata={"skipped": True, "reason": "HyDE disabled or no API key"},
+            )
+        
+        hyde_config = HyDEConfig(
+            enabled=True,
+            model=getattr(self.config, 'rag_hyde_model', self.config.openai_model),
+            num_hypotheticals=1,
+        )
+        hyde = HyDEGenerator(config=self.config, hyde_config=hyde_config)
+        
+        gc.collect()
+        tracemalloc.start()
+        start = time.perf_counter()
+        
+        results = []
+        for query in queries[:num_queries]:
+            try:
+                result = await hyde.generate(query)
+                results.append(result)
+            except Exception as e:
+                print(f"   [warn] HyDE failed for query: {e}")
+        
+        duration = time.perf_counter() - start
+        memory = measure_memory()
+        tracemalloc.stop()
+        
+        successful = len([r for r in results if r.has_hypotheticals])
+        
+        return BenchmarkResult(
+            name="5. HyDE Generation",
+            duration_seconds=duration,
+            items_processed=successful,
+            rate_per_second=successful / duration if duration > 0 else 0,
+            memory_mb=memory,
+            metadata={
+                "queries_attempted": num_queries,
+                "successful": successful,
+                "avg_time_per_query": duration / num_queries if num_queries > 0 else 0,
+            },
+        )
+    
+    async def benchmark_query_expansion(self, num_queries: int = 5) -> BenchmarkResult:
+        """Benchmark query expansion with real LLM calls."""
+        from triple_hybrid_rag.retrieval.query_expansion import QueryExpander, QueryExpansionConfig
+        
+        queries = [
+            "What is the refund policy?",
+            "How to configure database settings?",
+            "Machine learning implementation details",
+            "Project architecture overview",
+            "Performance benchmarks",
+        ]
+        
+        query_exp_enabled = getattr(self.config, 'rag_query_expansion_enabled', False)
+        if not query_exp_enabled or not self.config.openai_api_key:
+            return BenchmarkResult(
+                name="6. Query Expansion",
+                duration_seconds=0,
+                items_processed=0,
+                rate_per_second=0,
+                metadata={"skipped": True, "reason": "Query expansion disabled or no API key"},
+            )
+        
+        exp_config = QueryExpansionConfig(
+            enabled=True,
+            model=getattr(self.config, 'rag_query_expansion_model', self.config.openai_model),
+            num_query_variants=3,
+        )
+        expander = QueryExpander(config=self.config, expansion_config=exp_config)
+        
+        gc.collect()
+        tracemalloc.start()
+        start = time.perf_counter()
+        
+        results = []
+        total_variants = 0
+        for query in queries[:num_queries]:
+            try:
+                result = await expander.expand(query)
+                results.append(result)
+                total_variants += result.num_expansions
+            except Exception as e:
+                print(f"   [warn] Query expansion failed: {e}")
+        
+        duration = time.perf_counter() - start
+        memory = measure_memory()
+        tracemalloc.stop()
+        
+        return BenchmarkResult(
+            name="6. Query Expansion",
+            duration_seconds=duration,
+            items_processed=total_variants,
+            rate_per_second=total_variants / duration if duration > 0 else 0,
+            memory_mb=memory,
+            metadata={
+                "queries_attempted": num_queries,
+                "total_variants": total_variants,
+                "avg_variants_per_query": total_variants / len(results) if results else 0,
+            },
+        )
+    
+    async def benchmark_rrf_fusion(self, num_results: int = 100) -> BenchmarkResult:
+        """Benchmark RRF fusion with simulated results."""
+        from triple_hybrid_rag.core.fusion import RRFFusion
+        from triple_hybrid_rag.types import SearchResult, SearchChannel, Modality
+        
+        def make_results(channel: SearchChannel, count: int) -> List[SearchResult]:
+            results = []
+            for i in range(count):
+                r = SearchResult(
+                    chunk_id=uuid4(),
+                    parent_id=uuid4(),
+                    document_id=uuid4(),
+                    text=f"Result {i} from {channel.value}",
+                    page=1,
+                    modality=Modality.TEXT,
+                    source_channel=channel,
+                )
+                if channel == SearchChannel.SEMANTIC:
+                    r.semantic_score = 1.0 - (i * 0.01)
+                elif channel == SearchChannel.LEXICAL:
+                    r.lexical_score = 1.0 - (i * 0.01)
+                results.append(r)
+            return results
+        
+        lexical = make_results(SearchChannel.LEXICAL, num_results)
+        semantic = make_results(SearchChannel.SEMANTIC, num_results)
+        graph = make_results(SearchChannel.GRAPH, num_results // 2)
+        
+        fusion = RRFFusion(config=self.config)
+        
+        gc.collect()
+        tracemalloc.start()
+        start = time.perf_counter()
+        
+        iterations = 50
+        for _ in range(iterations):
+            fused = fusion.fuse(
+                lexical_results=lexical,
+                semantic_results=semantic,
+                graph_results=graph,
+                top_k=20,
+            )
+        
+        duration = time.perf_counter() - start
+        memory = measure_memory()
+        tracemalloc.stop()
+        
+        total_input = (len(lexical) + len(semantic) + len(graph)) * iterations
+        
+        return BenchmarkResult(
+            name="7. RRF Fusion",
+            duration_seconds=duration,
+            items_processed=total_input,
+            rate_per_second=total_input / duration if duration > 0 else 0,
+            memory_mb=memory,
+            metadata={
+                "iterations": iterations,
+                "results_per_channel": num_results,
+                "fused_output_size": len(fused),
+            },
+        )
+    
+    async def benchmark_diversity_optimization(self, num_results: int = 100) -> BenchmarkResult:
+        """Benchmark diversity optimization."""
+        from triple_hybrid_rag.retrieval.diversity import DiversityOptimizer, DiversityConfig
+        from triple_hybrid_rag.types import SearchResult, SearchChannel, Modality
+        import random
+        
+        results = []
+        for i in range(num_results):
+            r = SearchResult(
+                chunk_id=uuid4(),
+                parent_id=uuid4(),
+                document_id=uuid4(),
+                text=f"Result {i} content",
+                page=i % 10 + 1,
+                modality=Modality.TEXT,
+                source_channel=SearchChannel.SEMANTIC,
+            )
+            r.final_score = 1.0 - (i * 0.01)
+            r.metadata["embedding"] = [random.random() for _ in range(128)]
+            results.append(r)
+        
+        div_config = DiversityConfig(
+            enabled=True,
+            mmr_lambda=getattr(self.config, 'rag_diversity_mmr_lambda', 0.7),
+            max_per_document=3,
+            max_per_page=2,
+        )
+        optimizer = DiversityOptimizer(config=div_config)
+        
+        gc.collect()
+        tracemalloc.start()
+        start = time.perf_counter()
+        
+        iterations = 50
+        for _ in range(iterations):
+            optimized = optimizer.optimize(results, top_k=20)
+        
+        duration = time.perf_counter() - start
+        memory = measure_memory()
+        tracemalloc.stop()
+        
+        return BenchmarkResult(
+            name="8. Diversity Optimization",
+            duration_seconds=duration,
+            items_processed=iterations * num_results,
+            rate_per_second=(iterations * num_results) / duration if duration > 0 else 0,
+            memory_mb=memory,
+            metadata={
+                "iterations": iterations,
+                "input_results": num_results,
+                "mmr_lambda": div_config.mmr_lambda,
+            },
+        )
+    
+    async def benchmark_full_pipeline(
+        self, 
+        text: str, 
+        num_embed_chunks: int,
+    ) -> BenchmarkResult:
+        """Benchmark the complete pipeline: chunk + embed."""
+        gc.collect()
+        tracemalloc.start()
+        start = time.perf_counter()
+        
+        chunker = HierarchicalChunker(config=self.config)
+        _, child_chunks = chunker.split_document(text, uuid4(), "benchmark")
+        pipeline_texts = [c.text for c in child_chunks[:num_embed_chunks]]
+        await self.embedder.embed_texts_concurrent(pipeline_texts)
+        
+        duration = time.perf_counter() - start
+        memory = measure_memory()
+        tracemalloc.stop()
+        
+        return BenchmarkResult(
+            name="9. Full Pipeline (Chunk + Embed)",
+            duration_seconds=duration,
+            items_processed=len(pipeline_texts),
+            rate_per_second=len(pipeline_texts) / duration if duration > 0 else 0,
+            memory_mb=memory,
+            metadata={"stages": "chunking + embedding"},
+        )
+    
     async def run_suite(self, text: str, num_embed_chunks: int = 500) -> E2EBenchmarkSuite:
         """Run the full e2e benchmark suite."""
         suite_start = time.perf_counter()
         results = []
         
-        print("Running E2E benchmarks...\n")
+        print("Running E2E benchmarks (Enhanced Pipeline)...\n")
         
         # 1. Chunking
-        print("  [1/5] Chunking document...")
+        print("  [1/9] Chunking document...")
         chunk_result, child_texts = self.benchmark_chunking(text)
         results.append(chunk_result)
         print(f"        → {chunk_result.items_processed} chunks at {chunk_result.rate_per_second:.1f}/s")
@@ -381,45 +656,66 @@ class E2EBenchmarker:
         texts_to_embed = child_texts[:num_embed_chunks]
         print(f"\n  Using {len(texts_to_embed)} chunks for embedding benchmarks\n")
         
-        # 2. Sequential vs Concurrent embedding
-        print("  [2/5] Sequential embedding...")
-        result_seq, result_conc = await self.benchmark_concurrent_vs_sequential(texts_to_embed)
-        results.append(result_seq)
-        print(f"        → {result_seq.rate_per_second:.1f} texts/s")
-        
-        print("  [3/5] Concurrent embedding...")
-        results.append(result_conc)
-        print(f"        → {result_conc.rate_per_second:.1f} texts/s ({result_conc.metadata.get('speedup', 'N/A')} speedup)")
+        # 2. Direct embedding
+        print("  [2/9] Direct embedding (no cache)...")
+        embed_result = await self.benchmark_embedding_real(texts_to_embed, use_cache=False)
+        results.append(embed_result)
+        print(f"        → {embed_result.rate_per_second:.1f} texts/s")
         
         # 3. Cache effectiveness
-        print("  [4/5] Cache effectiveness test...")
+        print("  [3/9] Cache effectiveness test...")
         cache_result = await self.benchmark_embedding_cache_effectiveness(
-            texts_to_embed[:min(200, len(texts_to_embed))],  # Smaller set for cache test
+            texts_to_embed[:min(200, len(texts_to_embed))],
             duplicate_ratio=0.3,
         )
         results.append(cache_result)
         print(f"        → Hit rate: {cache_result.metadata.get('final_hit_rate', 0):.1%}")
         
-        # 4. Full pipeline (chunking + concurrent embedding)
-        print("  [5/5] Full pipeline (chunk + embed)...")
-        gc.collect()
-        pipeline_start = time.perf_counter()
+        # 4. Sequential vs Concurrent
+        print("  [4/9] Sequential vs Concurrent embedding...")
+        result_seq, result_conc = await self.benchmark_concurrent_vs_sequential(
+            texts_to_embed[:min(100, len(texts_to_embed))]
+        )
+        results.append(result_seq)
+        results.append(result_conc)
+        print(f"        → Seq: {result_seq.rate_per_second:.1f}/s, Conc: {result_conc.rate_per_second:.1f}/s")
+        print(f"        → Speedup: {result_conc.metadata.get('speedup', 'N/A')}")
         
-        chunker = HierarchicalChunker(config=self.config)
-        _, child_chunks = chunker.split_document(text, uuid4(), "benchmark")
-        pipeline_texts = [c.text for c in child_chunks[:num_embed_chunks]]
-        await self.embedder.embed_texts_concurrent(pipeline_texts)
+        # 5. HyDE Generation (NEW)
+        print("  [5/9] HyDE Generation (real LLM)...")
+        hyde_result = await self.benchmark_hyde_generation(num_queries=3)
+        results.append(hyde_result)
+        if hyde_result.metadata.get('skipped'):
+            print(f"        → Skipped: {hyde_result.metadata.get('reason')}")
+        else:
+            print(f"        → {hyde_result.items_processed} hypotheticals generated")
         
-        pipeline_duration = time.perf_counter() - pipeline_start
+        # 6. Query Expansion (NEW)
+        print("  [6/9] Query Expansion (real LLM)...")
+        qexp_result = await self.benchmark_query_expansion(num_queries=3)
+        results.append(qexp_result)
+        if qexp_result.metadata.get('skipped'):
+            print(f"        → Skipped: {qexp_result.metadata.get('reason')}")
+        else:
+            print(f"        → {qexp_result.items_processed} query variants generated")
         
-        results.append(BenchmarkResult(
-            name="full_pipeline",
-            duration_seconds=pipeline_duration,
-            items_processed=len(pipeline_texts),
-            rate_per_second=len(pipeline_texts) / pipeline_duration if pipeline_duration > 0 else 0,
-            metadata={"stages": "chunking + embedding"},
-        ))
-        print(f"        → {len(pipeline_texts)} chunks in {pipeline_duration:.2f}s")
+        # 7. RRF Fusion
+        print("  [7/9] RRF Fusion...")
+        fusion_result = await self.benchmark_rrf_fusion(100)
+        results.append(fusion_result)
+        print(f"        → {fusion_result.rate_per_second:.1f} results/s fused")
+        
+        # 8. Diversity Optimization
+        print("  [8/9] Diversity Optimization (MMR)...")
+        div_result = await self.benchmark_diversity_optimization(100)
+        results.append(div_result)
+        print(f"        → {div_result.rate_per_second:.1f} results/s optimized")
+        
+        # 9. Full pipeline
+        print("  [9/9] Full pipeline (chunk + embed)...")
+        pipeline_result = await self.benchmark_full_pipeline(text, num_embed_chunks)
+        results.append(pipeline_result)
+        print(f"        → {pipeline_result.items_processed} chunks in {pipeline_result.duration_seconds:.2f}s")
         
         suite_duration = time.perf_counter() - suite_start
         
@@ -478,9 +774,9 @@ async def main():
     }
     num_lines, num_embed_chunks = size_map[args.size]
     
-    print(f"\n{'=' * 70}")
-    print(f"Triple-Hybrid-RAG E2E Performance Benchmark")
-    print(f"{'=' * 70}")
+    print(f"\n{'=' * 80}")
+    print(f"Triple-Hybrid-RAG E2E Performance Benchmark (Enhanced Pipeline)")
+    print(f"{'=' * 80}")
     print(f"Label: {args.label}")
     print(f"Test size: {args.size} ({num_lines:,} lines, {num_embed_chunks:,} embed chunks)")
     
@@ -492,7 +788,15 @@ async def main():
     print(f"  Batch Size: {config.rag_embed_batch_size}")
     print(f"  Concurrent Batches: {config.rag_embed_concurrent_batches}")
     print(f"  Cache: {config.rag_embedding_cache_backend if config.rag_embedding_cache_enabled else 'disabled'}")
-    print(f"{'=' * 70}\n")
+    
+    # Show Phase 1-6 settings
+    print(f"\n  Phase 1-6 Enhancements:")
+    print(f"  HyDE: {'✓' if getattr(config, 'rag_hyde_enabled', False) else '✗'}")
+    print(f"  Query Expansion: {'✓' if getattr(config, 'rag_query_expansion_enabled', False) else '✗'}")
+    print(f"  Multi-Stage Rerank: {'✓' if getattr(config, 'rag_multistage_rerank_enabled', False) else '✗'}")
+    print(f"  Diversity Opt: {'✓' if getattr(config, 'rag_diversity_enabled', False) else '✗'}")
+    
+    print(f"{'=' * 80}\n")
     
     # Generate test data
     print("Generating test data...")
@@ -509,6 +813,8 @@ async def main():
         print("\nMake sure the embedding server is running:")
         print(f"  vllm serve <model> --port 1234")
         print(f"  or: ollama serve")
+        import traceback
+        traceback.print_exc()
         return 1
     
     # Print summary
@@ -537,7 +843,9 @@ async def main():
             f.write("**Config:**\n")
             f.write(f"- API: `{config.rag_embed_api_base}`\n")
             f.write(f"- Model: `{config.rag_embed_model}`\n")
-            f.write(f"- Batch: {config.rag_embed_batch_size}, Concurrent: {config.rag_embed_concurrent_batches}\n\n")
+            f.write(f"- Batch: {config.rag_embed_batch_size}, Concurrent: {config.rag_embed_concurrent_batches}\n")
+            f.write(f"- HyDE: {'✓' if getattr(config, 'rag_hyde_enabled', False) else '✗'}")
+            f.write(f", Query Expansion: {'✓' if getattr(config, 'rag_query_expansion_enabled', False) else '✗'}\n\n")
             
             f.write("| Benchmark | Rate | Duration | Memory |\n")
             f.write("|-----------|------|----------|--------|\n")

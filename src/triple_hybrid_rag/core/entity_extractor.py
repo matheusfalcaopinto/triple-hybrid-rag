@@ -47,6 +47,24 @@ def _model_supports_temperature(model: str) -> bool:
             return False
     return True
 
+# Models that support reasoning_effort parameter (to control thinking depth)
+MODELS_WITH_REASONING_EFFORT = frozenset({
+    "gpt-5-nano",
+    "o1",
+    "o1-preview",
+    "o1-mini",
+    "o3",
+    "o3-mini",
+})
+
+def _model_supports_reasoning_effort(model: str) -> bool:
+    """Check if the model supports reasoning_effort parameter."""
+    model_lower = model.lower()
+    for model_name in MODELS_WITH_REASONING_EFFORT:
+        if model_name in model_lower:
+            return True
+    return False
+
 
 @dataclass
 class EntityExtraction:
@@ -139,6 +157,13 @@ class EntityRelationExtractor:
             request_kwargs["temperature"] = self.config.rag_ner_temperature
         else:
             logger.debug(f"Model {self.config.rag_ner_model} doesn't support temperature parameter, skipping")
+        
+        # Add reasoning_effort for reasoning models (gpt-5-nano, o1, o3)
+        # "low" = faster + cheaper (good for NER), "medium" = balanced, "high" = most thorough
+        if _model_supports_reasoning_effort(self.config.rag_ner_model):
+            reasoning_effort = getattr(self.config, 'rag_ner_reasoning_effort', 'low')
+            request_kwargs["reasoning_effort"] = reasoning_effort
+            logger.debug(f"Model {self.config.rag_ner_model} supports reasoning_effort, using: {reasoning_effort}")
         
         response = await self.client.chat.completions.create(**request_kwargs)
         content = response.choices[0].message.content or "{}"

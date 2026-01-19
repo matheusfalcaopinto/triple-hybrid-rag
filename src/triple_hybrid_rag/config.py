@@ -107,6 +107,22 @@ class RAGConfig(BaseSettings):
     )
     
     # ═══════════════════════════════════════════════════════════════════════════
+    # OCR INGESTION MODE
+    # ═══════════════════════════════════════════════════════════════════════════
+    rag_ocr_mode: str = Field(
+        default="auto",
+        description="OCR ingestion mode: 'qwen' (Qwen3-VL), 'deepseek' (DeepSeek OCR), 'off' (text extraction only), 'auto' (system decides based on file analysis)",
+    )
+    rag_ocr_auto_preferred: str = Field(
+        default="qwen",
+        description="Preferred OCR provider when AUTO mode decides OCR is needed: 'qwen' or 'deepseek'",
+    )
+    rag_ocr_auto_threshold: float = Field(
+        default=0.3,
+        description="Score threshold (0-1) for AUTO mode to enable OCR. Lower = more aggressive OCR usage.",
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
     # PUPPYGRAPH
     # ═══════════════════════════════════════════════════════════════════════════
     puppygraph_bolt_url: str = Field(
@@ -215,6 +231,26 @@ class RAGConfig(BaseSettings):
         description="Max batches to buffer between pipeline stages",
     )
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BATCH INFERENCE (OpenAI Batch API for ingestion)
+    # ═══════════════════════════════════════════════════════════════════════════
+    rag_batch_inference_enabled: bool = Field(
+        default=False,
+        description="Enable OpenAI Batch API for NER during ingestion. 50% cheaper but 24h completion window.",
+    )
+    rag_batch_inference_threshold: int = Field(
+        default=10,
+        description="Minimum number of chunks to trigger batch inference instead of real-time API.",
+    )
+    rag_batch_inference_check_interval: int = Field(
+        default=60,
+        description="Seconds between batch status checks.",
+    )
+    rag_batch_inference_max_wait: int = Field(
+        default=86400,
+        description="Maximum seconds to wait for batch completion (default: 24 hours).",
+    )
+    
     # Chunking features
     rag_parent_child_chunking: bool = Field(
         default=True,
@@ -290,6 +326,10 @@ class RAGConfig(BaseSettings):
         default=2000,
         description="Max characters per chunk sent to NER",
     )
+    rag_ner_reasoning_effort: str = Field(
+        default="low",
+        description="Reasoning effort for NER with gpt-5-nano/o1/o3 models: 'low', 'medium', 'high'. 'low' is faster and cheaper.",
+    )
     rag_entity_types: str = Field(
         default="PERSON,ORGANIZATION,PRODUCT,CLAUSE,DATE,MONEY,LOCATION,TECHNICAL_TERM",
         description="Comma-separated list of entity types to extract",
@@ -329,6 +369,166 @@ class RAGConfig(BaseSettings):
     rag_gundam_fuzzy_threshold: float = Field(
         default=0.85,
         description="Similarity threshold for fuzzy merge",
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # HYDE (HYPOTHETICAL DOCUMENT EMBEDDINGS)
+    # ═══════════════════════════════════════════════════════════════════════════
+    rag_hyde_enabled: bool = Field(
+        default=True,
+        description="Enable HyDE for query transformation",
+    )
+    rag_hyde_model: str = Field(
+        default="gpt-4o-mini",
+        description="LLM model for HyDE generation",
+    )
+    rag_hyde_temperature: float = Field(
+        default=0.7,
+        description="Temperature for HyDE generation",
+    )
+    rag_hyde_num_hypotheticals: int = Field(
+        default=1,
+        description="Number of hypothetical documents to generate",
+    )
+    rag_hyde_cache_enabled: bool = Field(
+        default=True,
+        description="Enable caching of HyDE results",
+    )
+    rag_hyde_use_intent_prompts: bool = Field(
+        default=True,
+        description="Use intent-specific prompt templates",
+    )
+    rag_hyde_fallback_to_original: bool = Field(
+        default=True,
+        description="Fall back to original query on generation failure",
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # QUERY EXPANSION
+    # ═══════════════════════════════════════════════════════════════════════════
+    rag_query_expansion_enabled: bool = Field(
+        default=True,
+        description="Enable query expansion for improved recall",
+    )
+    rag_query_expansion_num_variants: int = Field(
+        default=3,
+        description="Number of query variants to generate",
+    )
+    rag_query_expansion_model: str = Field(
+        default="gpt-4o-mini",
+        description="LLM model for query expansion",
+    )
+    rag_query_expansion_temperature: float = Field(
+        default=0.7,
+        description="Temperature for query expansion",
+    )
+    rag_query_prf_enabled: bool = Field(
+        default=True,
+        description="Enable Pseudo-Relevance Feedback",
+    )
+    rag_query_prf_top_k: int = Field(
+        default=3,
+        description="Top-k documents to use for PRF",
+    )
+    rag_query_prf_num_terms: int = Field(
+        default=10,
+        description="Number of expansion terms from PRF",
+    )
+    rag_query_decomposition_enabled: bool = Field(
+        default=True,
+        description="Enable query decomposition for complex queries",
+    )
+    rag_query_decomposition_threshold: int = Field(
+        default=5,
+        description="Word count threshold for decomposition",
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MULTI-STAGE RERANKING
+    # ═══════════════════════════════════════════════════════════════════════════
+    rag_multistage_rerank_enabled: bool = Field(
+        default=True,
+        description="Enable multi-stage reranking pipeline",
+    )
+    rag_rerank_stage1_enabled: bool = Field(
+        default=True,
+        description="Enable Stage 1 (bi-encoder filtering)",
+    )
+    rag_rerank_stage1_top_k: int = Field(
+        default=100,
+        description="Top-k results after Stage 1",
+    )
+    rag_rerank_stage2_enabled: bool = Field(
+        default=True,
+        description="Enable Stage 2 (cross-encoder scoring)",
+    )
+    rag_rerank_stage2_top_k: int = Field(
+        default=30,
+        description="Top-k results after Stage 2",
+    )
+    rag_rerank_stage2_model: str = Field(
+        default="gpt-4o-mini",
+        description="LLM model for cross-encoder reranking",
+    )
+    rag_rerank_stage2_batch_size: int = Field(
+        default=10,
+        description="Batch size for Stage 2 reranking",
+    )
+    rag_rerank_stage3_enabled: bool = Field(
+        default=True,
+        description="Enable Stage 3 (MMR diversity)",
+    )
+    rag_rerank_mmr_lambda: float = Field(
+        default=0.7,
+        description="MMR lambda (0=diversity, 1=relevance)",
+    )
+    rag_rerank_stage4_enabled: bool = Field(
+        default=True,
+        description="Enable Stage 4 (score calibration)",
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # DIVERSITY OPTIMIZATION
+    # ═══════════════════════════════════════════════════════════════════════════
+    rag_diversity_enabled: bool = Field(
+        default=True,
+        description="Enable diversity optimization",
+    )
+    rag_diversity_mmr_lambda: float = Field(
+        default=0.7,
+        description="MMR lambda for diversity (0=max diversity, 1=max relevance)",
+    )
+    rag_diversity_max_per_document: int = Field(
+        default=3,
+        description="Maximum results from a single document",
+    )
+    rag_diversity_max_per_page: int = Field(
+        default=2,
+        description="Maximum results from a single page",
+    )
+    rag_diversity_min_similarity_threshold: float = Field(
+        default=0.95,
+        description="Min similarity to consider as duplicate",
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LLM-AS-JUDGE EVALUATION
+    # ═══════════════════════════════════════════════════════════════════════════
+    rag_judge_enabled: bool = Field(
+        default=False,
+        description="Enable LLM-as-Judge for evaluation",
+    )
+    rag_judge_model: str = Field(
+        default="gpt-4o-mini",
+        description="LLM model for judging",
+    )
+    rag_judge_temperature: float = Field(
+        default=0.0,
+        description="Temperature for judge (low for consistency)",
+    )
+    rag_judge_max_concurrent: int = Field(
+        default=5,
+        description="Max concurrent judge requests",
     )
     
     # ═══════════════════════════════════════════════════════════════════════════

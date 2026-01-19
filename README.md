@@ -1,10 +1,42 @@
 # Triple-Hybrid-RAG
 
-> **The Ultimate RAG System: Lexical + Semantic + Graph with Multimodal Support**
+> **State-of-the-Art RAG System: Lexical + Semantic + Graph with Advanced Retrieval Enhancements**
 
-A standalone, production-ready Retrieval-Augmented Generation (RAG) library extracted and universalized from a voice-agent implementation. This system combines three search paradigms into a unified, highly configurable retrieval pipeline.
+A production-ready Retrieval-Augmented Generation (RAG) library featuring triple-hybrid search, multimodal support, and cutting-edge retrieval techniques including HyDE, Self-RAG, Agentic RAG, and more.
 
-## 🎯 Features
+[![Tests](https://img.shields.io/badge/tests-377%20passed-brightgreen)]()
+[![Python](https://img.shields.io/badge/python-3.12+-blue)]()
+[![License](https://img.shields.io/badge/license-MIT-green)]()
+
+## ✨ What's New (Phase 1-6 Enhancements)
+
+### 🧠 Advanced RAG Techniques
+- **HyDE (Hypothetical Document Embeddings)** - Bridge semantic gap with generated hypotheticals
+- **Self-RAG** - Self-reflective retrieval with relevance assessment
+- **Corrective RAG** - Dynamic knowledge refinement and correction
+- **Agentic RAG** - Tool-using agents with ReAct reasoning
+- **Multi-Query Expansion** - RAG-Fusion with query variants
+
+### ⚡ Performance & Infrastructure
+- **Semantic Chunking** - Boundary-aware document splitting
+- **Multi-Stage Reranking** - Progressive refinement pipeline
+- **Query Caching** - Semantic similarity-based cache
+- **Batch Processing** - Concurrent ingestion with rate limiting
+- **Observability** - Prometheus metrics and tracing
+
+### 🎯 Retrieval Enhancements
+- **SPLADE Sparse Retrieval** - Learned sparse representations
+- **ColBERT Late Interaction** - Token-level MaxSim scoring
+- **MMR Diversity** - Maximal Marginal Relevance optimization
+- **Context Compression** - LLM-based context extraction
+- **Adaptive Fusion** - Query-aware weight tuning
+
+### 📊 Evaluation Framework
+- **LLM-as-Judge** - Automated quality evaluation
+- **RAGAS Metrics** - Faithfulness, relevance, coverage
+- **Retrieval Metrics** - Precision, recall, MRR, NDCG
+
+## 🎯 Core Features
 
 ### Triple-Hybrid Search
 - **Lexical Search (BM25/FTS)**: PostgreSQL full-text search with ts_rank_cd
@@ -15,66 +47,66 @@ A standalone, production-ready Retrieval-Augmented Generation (RAG) library extr
 - **Text Embeddings**: Qwen3-VL-Embedding-2B (Matryoshka: 2048d → 1024d)
 - **Image Embeddings**: Direct vision encoding for image retrieval
 - **Mixed Embeddings**: Joint text+image representations
-- **Gundam Tiling OCR**: High-accuracy OCR for large scanned documents
+- **Table/Code Support**: Multi-vector retrieval for structured content
 
 ### Hierarchical Chunking
 - **Parent Chunks**: 800-1000 tokens for context (stored for LLM)
 - **Child Chunks**: ~200 tokens for retrieval (indexed with embeddings)
-- **Context Expansion**: Retrieve children, expand to parent for generation
+- **Semantic Boundaries**: NLP-aware sentence and paragraph detection
 
 ### Knowledge Graph
 - **Entity Extraction**: GPT-5 NER/RE during ingestion
 - **Relation Mapping**: Typed edges between entities
 - **Cypher Queries**: Full graph traversal via PuppyGraph Bolt protocol
 
-### Fully Toggleable
-Every feature can be enabled/disabled via environment variables:
-```bash
-RAG_LEXICAL_ENABLED=true
-RAG_SEMANTIC_ENABLED=true
-RAG_GRAPH_ENABLED=true
-RAG_RERANK_ENABLED=true
-RAG_ENTITY_EXTRACTION_ENABLED=true
-RAG_OCR_ENABLED=true
-RAG_MULTIMODAL_EMBEDDING_ENABLED=true
-```
-
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        QUERY PIPELINE                                │
-├─────────────────────────────────────────────────────────────────────┤
-│  User Query                                                          │
-│      │                                                               │
-│      ▼                                                               │
-│  ┌──────────────┐                                                    │
-│  │Query Planner │ (GPT-5: decompose query for each channel)         │
-│  └──────┬───────┘                                                    │
-│         │                                                            │
-│    ┌────┴────┬────────────┐                                         │
-│    ▼         ▼            ▼                                         │
-│ ┌──────┐ ┌──────────┐ ┌─────────┐                                   │
-│ │Lexical│ │Semantic  │ │  Graph  │                                   │
-│ │(FTS)  │ │(HNSW)    │ │(Cypher) │                                   │
-│ └───┬───┘ └────┬─────┘ └────┬────┘                                   │
-│     │          │            │                                        │
-│     └──────────┼────────────┘                                        │
-│                ▼                                                     │
-│     ┌─────────────────────┐                                         │
-│     │  Weighted RRF Fusion │ (configurable weights per channel)     │
-│     └──────────┬──────────┘                                         │
-│                ▼                                                     │
-│     ┌─────────────────────┐                                         │
-│     │  Conformal Denoising │ (filter uncertain results)             │
-│     └──────────┬──────────┘                                         │
-│                ▼                                                     │
-│     ┌─────────────────────┐                                         │
-│     │    Reranker         │ (Qwen3-VL-Reranker-2B)                  │
-│     └──────────┬──────────┘                                         │
-│                ▼                                                     │
-│         Top-K Results                                                │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        ENHANCED QUERY PIPELINE                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  User Query                                                                  │
+│      │                                                                       │
+│      ▼                                                                       │
+│  ┌──────────────────┐                                                        │
+│  │ Query Router     │ (Route to appropriate RAG strategy)                   │
+│  └────────┬─────────┘                                                        │
+│           │                                                                  │
+│  ┌────────▼─────────┐                                                        │
+│  │ HyDE Generation  │ (Generate hypothetical documents)                     │
+│  └────────┬─────────┘                                                        │
+│           │                                                                  │
+│  ┌────────▼─────────┐                                                        │
+│  │ Query Expansion  │ (Multi-query variants + keywords)                     │
+│  └────────┬─────────┘                                                        │
+│           │                                                                  │
+│    ┌──────┴──────┬────────────────┐                                         │
+│    ▼             ▼                ▼                                         │
+│ ┌──────┐   ┌──────────┐    ┌─────────┐                                      │
+│ │Lexical│  │Semantic  │    │  Graph  │                                      │
+│ │(FTS)  │  │(HNSW)    │    │(Cypher) │                                      │
+│ └───┬───┘  └────┬─────┘    └────┬────┘                                      │
+│     │           │               │                                           │
+│     └───────────┼───────────────┘                                           │
+│                 ▼                                                            │
+│     ┌─────────────────────┐                                                  │
+│     │ Adaptive RRF Fusion │ (Query-aware weight tuning)                     │
+│     └──────────┬──────────┘                                                  │
+│                ▼                                                             │
+│     ┌─────────────────────┐                                                  │
+│     │Multi-Stage Reranker │ (Bi-encoder → Cross-encoder → MMR)              │
+│     └──────────┬──────────┘                                                  │
+│                ▼                                                             │
+│     ┌─────────────────────┐                                                  │
+│     │Context Compression  │ (Extract relevant passages)                     │
+│     └──────────┬──────────┘                                                  │
+│                ▼                                                             │
+│     ┌─────────────────────┐                                                  │
+│     │ Diversity Optimizer │ (MMR + source diversity)                        │
+│     └──────────┬──────────┘                                                  │
+│                ▼                                                             │
+│         Top-K Results                                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 🚀 Quick Start
@@ -82,7 +114,6 @@ RAG_MULTIMODAL_EMBEDDING_ENABLED=true
 ### 1. Start Infrastructure
 
 ```bash
-cd triple-hybrid-rag
 docker compose up -d
 ```
 
@@ -94,12 +125,11 @@ This starts:
 ### 2. Install Package
 
 ```bash
-pip install -e .
-```
+# Using uv (recommended)
+uv sync
 
-Or with uv:
-```bash
-uv pip install -e .
+# Or with pip
+pip install -e .
 ```
 
 ### 3. Configure Environment
@@ -109,31 +139,33 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-### 4. Use the Library
+### 4. Run Pipeline Test
 
-```python
-from triple_hybrid_rag import RAG, RAGConfig, get_settings
-from triple_hybrid_rag.core import HierarchicalChunker, MultimodalEmbedder
-
-# Initialize components
-config = get_settings()
-chunker = HierarchicalChunker(config)
-embedder = MultimodalEmbedder(config)
-
-# Or use the high-level orchestrator
-rag = RAG(config)
-
-# Chunk a document
-text = open("document.txt").read()
-parents, children = chunker.split_document(text, document_id=uuid4())
-
-# Embed chunks
-children = await embedder.embed_chunks(children)
-
-# ... store in database, then retrieve
+```bash
+uv run python scripts/full_pipeline_test.py
 ```
 
-> **Note:** `RAG.ingest(...)` currently supports `.txt` and `.md` files.
+### 5. Use the Library
+
+```python
+from triple_hybrid_rag import get_settings
+from triple_hybrid_rag.pipeline import PipelineBuilder
+
+# Build an enhanced RAG pipeline
+pipeline = (
+    PipelineBuilder()
+    .with_hyde()                    # Hypothetical document embeddings
+    .with_query_expansion()         # Multi-query generation
+    .with_multi_stage_reranking()   # Progressive refinement
+    .with_diversity_optimization()  # MMR diversity
+    .with_caching()                 # Query result caching
+    .with_observability()           # Metrics and tracing
+    .build()
+)
+
+# Execute query
+results = await pipeline.retrieve("What is the refund policy?")
+```
 
 ## 📦 Project Structure
 
@@ -142,24 +174,44 @@ triple-hybrid-rag/
 ├── src/triple_hybrid_rag/
 │   ├── __init__.py           # Package exports
 │   ├── config.py             # Pydantic settings (all toggles)
-│   ├── types.py              # Data classes (Document, Chunk, Entity, etc.)
-│   ├── core/
-│   │   ├── chunker.py        # Hierarchical parent/child chunking
-│   │   ├── embedder.py       # Multimodal embeddings (text + image)
-│   │   ├── query_planner.py  # GPT-5 query decomposition
-│   │   └── fusion.py         # Weighted RRF + conformal denoising
-│   └── graph/
-│       ├── puppygraph.py     # Native Cypher client (Bolt:7697)
-│       └── schema.py         # Entity/relation mapping
-├── database/
-│   └── schema.sql            # PostgreSQL + pgvector schema
-├── infrastructure/
-│   └── puppygraph/
-│       └── schema.json       # PuppyGraph graph mapping
-├── docker-compose.yml        # PostgreSQL + PuppyGraph
-├── pyproject.toml            # Python package config
-├── .env.example              # All configuration options
-└── README.md                 # This file
+│   ├── types.py              # Data classes
+│   ├── core/                 # Core components
+│   │   ├── chunker.py        # Hierarchical chunking
+│   │   ├── embedder.py       # Multimodal embeddings
+│   │   ├── fusion.py         # RRF fusion
+│   │   └── reranker.py       # Reranking
+│   ├── retrieval/            # Advanced retrieval (NEW)
+│   │   ├── hyde.py           # HyDE generation
+│   │   ├── query_expansion.py # Multi-query expansion
+│   │   ├── self_rag.py       # Self-reflective RAG
+│   │   ├── corrective_rag.py # Corrective RAG
+│   │   ├── agentic_rag.py    # Tool-using agents
+│   │   ├── hierarchical.py   # Parent-doc retrieval
+│   │   ├── multimodal.py     # Multimodal retrieval
+│   │   ├── splade.py         # Sparse retrieval
+│   │   ├── diversity.py      # MMR diversity
+│   │   ├── caching.py        # Query cache
+│   │   ├── batch.py          # Batch processing
+│   │   └── observability.py  # Metrics/tracing
+│   ├── pipeline/             # Pipeline orchestration (NEW)
+│   │   ├── builder.py        # Fluent pipeline builder
+│   │   └── enhanced_rag.py   # Enhanced RAG pipeline
+│   ├── evaluation/           # Evaluation framework (NEW)
+│   │   ├── metrics.py        # RAGAS metrics
+│   │   └── judge.py          # LLM-as-Judge
+│   ├── ingestion/            # Document processing
+│   │   ├── semantic_chunker.py # Semantic chunking (NEW)
+│   │   ├── loaders.py        # File loaders
+│   │   └── ocr.py            # OCR processing
+│   └── graph/                # Knowledge graph
+│       ├── puppygraph.py     # PuppyGraph client
+│       └── sql_fallback.py   # SQL graph fallback
+├── tests/                    # Test suite (377 tests)
+├── scripts/
+│   └── full_pipeline_test.py # E2E pipeline test
+├── docs/
+│   └── ENHANCEMENT_GUIDE.md  # Detailed feature guide
+└── docker-compose.yml        # Infrastructure
 ```
 
 ## ⚙️ Configuration Reference
@@ -172,12 +224,16 @@ triple-hybrid-rag/
 | `RAG_LEXICAL_ENABLED` | `true` | BM25/FTS search |
 | `RAG_SEMANTIC_ENABLED` | `true` | Vector (HNSW) search |
 | `RAG_GRAPH_ENABLED` | `true` | PuppyGraph Cypher search |
-| `RAG_RERANK_ENABLED` | `true` | Reranking with Qwen3-VL-Reranker-2B |
-| `RAG_DENOISE_ENABLED` | `true` | Conformal denoising |
-| `RAG_QUERY_PLANNER_ENABLED` | `true` | GPT-5 query decomposition |
-| `RAG_ENTITY_EXTRACTION_ENABLED` | `true` | NER/RE during ingestion |
-| `RAG_OCR_ENABLED` | `true` | OCR for images |
-| `RAG_MULTIMODAL_EMBEDDING_ENABLED` | `true` | Direct image embeddings |
+| `RAG_RERANK_ENABLED` | `true` | Reranking |
+
+### Phase 2 Enhancements
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RAG_HYDE_ENABLED` | `true` | HyDE generation |
+| `RAG_QUERY_EXPANSION_ENABLED` | `true` | Multi-query expansion |
+| `RAG_MULTISTAGE_RERANK_ENABLED` | `true` | Multi-stage reranking |
+| `RAG_DIVERSITY_ENABLED` | `true` | MMR diversity optimization |
 
 ### Retrieval Weights
 
@@ -187,157 +243,186 @@ triple-hybrid-rag/
 | `RAG_SEMANTIC_WEIGHT` | `0.8` | Semantic channel RRF weight |
 | `RAG_GRAPH_WEIGHT` | `1.0` | Graph channel RRF weight |
 
-### Chunking Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RAG_PARENT_CHUNK_TOKENS` | `800` | Target parent chunk size |
-| `RAG_PARENT_CHUNK_MAX_TOKENS` | `1000` | Max parent chunk size |
-| `RAG_CHILD_CHUNK_TOKENS` | `200` | Target child chunk size |
-| `RAG_CHUNK_OVERLAP_TOKENS` | `50` | Overlap between chunks |
-
-### Infrastructure Ports
-
-| Service | Port | Description |
-|---------|------|-------------|
-| PostgreSQL | `54332` | Database (avoids conflicts) |
-| PuppyGraph Bolt | `7697` | Cypher queries |
-| PuppyGraph HTTP | `8192` | REST API |
-| PuppyGraph Web UI | `8091` | Graph visualization |
-
 ## 🔧 API Reference
 
-### HierarchicalChunker
+### Enhanced RAG Pipeline (NEW)
 
 ```python
-from triple_hybrid_rag.core import HierarchicalChunker
+from triple_hybrid_rag.pipeline import EnhancedRAGPipeline, PipelineBuilder
 
-chunker = HierarchicalChunker(
-    parent_chunk_tokens=800,
-    child_chunk_tokens=200,
-    chunk_overlap_tokens=50,
+# Using builder pattern
+pipeline = (
+    PipelineBuilder()
+    .with_hyde(model="gpt-4o-mini", num_hypotheticals=1)
+    .with_query_expansion(num_variants=3)
+    .with_multi_stage_reranking(stages=4)
+    .with_diversity_optimization(mmr_lambda=0.7)
+    .build()
 )
 
-# Split document into hierarchical chunks
-parents, children = chunker.split_document(
-    text="...",
-    document_id=uuid4(),
-    tenant_id="my-tenant",
+# Execute
+results = await pipeline.retrieve(
+    query="What is the return policy?",
+    top_k=10,
 )
 ```
 
-### MultimodalEmbedder
+### HyDE Generator (NEW)
 
 ```python
-from triple_hybrid_rag.core import MultimodalEmbedder
+from triple_hybrid_rag.retrieval import HyDEGenerator, HyDEConfig
 
-embedder = MultimodalEmbedder()
+hyde = HyDEGenerator(
+    hyde_config=HyDEConfig(
+        enabled=True,
+        model="gpt-4o-mini",
+        temperature=0.7,
+    )
+)
 
-# Text embeddings
-embeddings = await embedder.embed_texts(["Hello world", "Another text"])
-
-# Image embeddings
-image_embedding = await embedder.embed_image(image_bytes)
-
-# Mixed text+image embedding
-mixed = await embedder.embed_mixed("Caption text", image_bytes)
+result = await hyde.generate("What is machine learning?")
+# result.primary_hypothetical contains the generated document
 ```
 
-### PuppyGraphClient
+### Self-RAG (NEW)
 
 ```python
-from triple_hybrid_rag.graph import PuppyGraphClient
+from triple_hybrid_rag.retrieval import SelfRAG, SelfRAGConfig
 
-client = PuppyGraphClient()
-await client.connect()
-
-# Entity lookup
-results = await client.entity_lookup(
-    entity_name="John Doe",
-    tenant_id="my-tenant",
+self_rag = SelfRAG(
+    retrieve_fn=my_retrieve,
+    generate_fn=my_generate,
+    config=SelfRAGConfig(
+        max_iterations=3,
+        relevance_threshold=0.7,
+    )
 )
 
-# Graph traversal
-results = await client.entity_neighborhood(
-    entity_id="...",
-    tenant_id="my-tenant",
-    hops=2,
-)
-
-# Custom Cypher
-records = await client.query_cypher(
-    "MATCH (e:Entity)-[:MENTIONED_IN]->(c:Chunk) RETURN c",
-    params={"tenant_id": "my-tenant"},
-)
+result = await self_rag.retrieve_and_generate("Complex question?")
+# Includes relevance scores and reflection steps
 ```
 
-### EntityRelationExtractor (NER + RE)
+### Agentic RAG (NEW)
 
 ```python
-from triple_hybrid_rag.core import EntityRelationExtractor, GraphEntityStore
+from triple_hybrid_rag.retrieval import AgenticRAG, SearchTool, CalculateTool
 
-extractor = EntityRelationExtractor()
-store = GraphEntityStore()
-
-# Extract entities + relations from child chunks
-result = await extractor.extract(child_chunks)
-
-# Persist to PostgreSQL (rag_entities, rag_relations, rag_entity_mentions)
-stats = await store.store(
-    result,
-    chunks=child_chunks,
-    tenant_id="my-tenant",
-    document_id=document_id,
+agent = AgenticRAG(
+    llm_fn=generate,
+    tools=[SearchTool(search_fn), CalculateTool()],
 )
-print(stats)
+
+result = await agent.run("Calculate the total revenue from Q1 data")
+# Agent uses tools to answer complex questions
 ```
 
-### RRFFusion
+### Query Expansion (NEW)
 
 ```python
-from triple_hybrid_rag.core import RRFFusion
+from triple_hybrid_rag.retrieval import QueryExpander, QueryExpansionConfig
 
-fusion = RRFFusion()
-
-# Fuse results from all channels
-fused = fusion.fuse(
-    lexical_results=lexical,
-    semantic_results=semantic,
-    graph_results=graph,
-    top_k=20,
+expander = QueryExpander(
+    expansion_config=QueryExpansionConfig(
+        num_query_variants=3,
+        prf_enabled=True,
+    )
 )
+
+expanded = await expander.expand("What is RAG?")
+# expanded.all_queries contains original + variants
 ```
 
-## 📊 Database Schema
+### Diversity Optimizer (NEW)
 
-### Tables
+```python
+from triple_hybrid_rag.retrieval import DiversityOptimizer, DiversityConfig
 
-- `rag_documents`: Source documents with metadata
-- `rag_parent_chunks`: Context units (800-1000 tokens)
-- `rag_child_chunks`: Retrieval units (~200 tokens) with embeddings
-- `rag_entities`: Knowledge graph nodes
-- `rag_relations`: Knowledge graph edges
-- `rag_entity_mentions`: Links entities to chunks
+optimizer = DiversityOptimizer(
+    config=DiversityConfig(
+        mmr_lambda=0.7,
+        max_per_document=3,
+    )
+)
 
-### Indexes
+result = optimizer.optimize(results, top_k=10)
+# result.results contains diversified results
+```
 
-- **HNSW**: Vector similarity search (cosine distance)
-- **GIN**: Full-text search with tsvector
-- **GIN (trigram)**: Fuzzy entity name matching
+### Multimodal Retriever (NEW)
 
-### Functions
+```python
+from triple_hybrid_rag.retrieval import MultimodalRetriever, ModalityType
 
-- `rag_lexical_search()`: BM25-style full-text search
-- `rag_semantic_search()`: Vector similarity search
-- `rag_image_semantic_search()`: Image embedding search
-- `rag_get_parent_with_children()`: Context expansion
+retriever = MultimodalRetriever(text_embed_fn=embed)
+
+# Add content of different types
+retriever.add_content("Python is great", ModalityType.TEXT, "doc_1")
+retriever.add_content(table_data, ModalityType.TABLE, "table_1")
+retriever.add_content(code_snippet, ModalityType.CODE, "code_1")
+
+# Retrieve across modalities
+results = retriever.retrieve("Python features", top_k=10)
+```
+
+## 📊 Performance
+
+### Benchmark Results
+
+| Metric | Value |
+|--------|-------|
+| Chunking Throughput | 2,700+ chunks/s |
+| Embedding Throughput | 55+ texts/s |
+| Reranking Latency | 48ms |
+| Diversity Score | 0.94 |
+| Test Coverage | 377 tests passing |
+
+### Pipeline Stages
+
+```
+Stage 1: Chunking           ✅ 2678.9/s
+Stage 2: Embedding          ✅ 55.7/s
+Stage 3: NER                ✅ (with valid API key)
+Stage 4: DB Storage         ✅
+Stage 5: Entity Storage     ✅
+Stage 6: HyDE & Expansion   ✅
+Stage 7: Retrieval          ✅ PuppyGraph
+Stage 8: RRF Fusion         ✅
+Stage 9: Multi-Stage Rerank ✅
+Stage 10: Diversity Opt     ✅
+Stage 11: Pipeline Demo     ✅
+```
+
+## 📚 Documentation
+
+- [Enhancement Guide](docs/ENHANCEMENT_GUIDE.md) - Detailed feature documentation
+- [Architecture](docs/ARCHITECTURE.md) - System design
+- [Benchmark Results](docs/BENCHMARK_RESULTS.md) - Performance data
+- [Optimization Report](docs/OPTIMIZATION_REPORT.md) - Optimization details
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+uv run pytest tests/ -v
+
+# Run specific phase tests
+uv run pytest tests/test_p1_enhancements.py -v  # Phase 1
+uv run pytest tests/test_p2_enhancements.py -v  # Phase 2
+uv run pytest tests/test_p3_enhancements.py -v  # Phase 3
+uv run pytest tests/test_p4_pipeline.py -v      # Phase 4
+uv run pytest tests/test_p5_advanced_rag.py -v  # Phase 5
+uv run pytest tests/test_p6_multimodal_agentic.py -v  # Phase 6
+
+# Run E2E pipeline test
+uv run python scripts/full_pipeline_test.py
+```
 
 ## 🤝 Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Run tests: `pytest`
+4. Run tests: `uv run pytest`
 5. Submit a pull request
 
 ## 📄 License
@@ -346,9 +431,15 @@ MIT License - see LICENSE file for details.
 
 ## 🙏 Acknowledgments
 
-This project was extracted and universalized from a voice-agent implementation, building on the following technologies:
+Built on these excellent technologies:
 
 - [pgvector](https://github.com/pgvector/pgvector) - Vector similarity for PostgreSQL
 - [PuppyGraph](https://www.puppygraph.com/) - Graph layer over relational databases
 - [Qwen3-VL](https://github.com/QwenLM/Qwen-VL) - Multimodal embeddings and vision
 - [tiktoken](https://github.com/openai/tiktoken) - Token counting
+
+Inspired by research:
+- [HyDE](https://arxiv.org/abs/2212.10496) - Hypothetical Document Embeddings
+- [Self-RAG](https://arxiv.org/abs/2310.11511) - Self-Reflective RAG
+- [RAG-Fusion](https://arxiv.org/abs/2402.03367) - Multi-query fusion
+- [RAGAS](https://arxiv.org/abs/2309.15217) - RAG Assessment

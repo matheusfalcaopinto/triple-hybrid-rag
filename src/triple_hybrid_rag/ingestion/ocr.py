@@ -3,10 +3,12 @@ OCR Processing Module
 
 Handles optical character recognition for scanned documents and images:
 - Qwen3-VL Vision API integration (OpenAI-compatible)
+- DeepSeek OCR support
 - **Gundam Tiling**: Overlapping tile strategy for high-resolution documents
 - Confidence tracking with heuristic estimation
 - Retry logic with tenacity + fallback modes
 - Table detection and preservation
+- AUTO mode for intelligent OCR decision-making
 """
 
 import asyncio
@@ -17,17 +19,71 @@ import time
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 import httpx
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from triple_hybrid_rag.config import RAGConfig, get_settings
 
+if TYPE_CHECKING:
+    from triple_hybrid_rag.ingestion.loaders import LoadedDocument
+
 # Default OCR prompt - kept simple for compatibility
 OCR_PROMPT = """OCR this image. Extract all text exactly as it appears. For tables, use Markdown format. Output only the extracted text."""
 
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILE EXTENSION CATEGORIES FOR AUTO MODE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Files that NEVER need OCR (pure text formats)
+TEXT_ONLY_EXTENSIONS: Set[str] = {
+    ".txt", ".md", ".markdown", ".csv", ".json", ".jsonl",
+    ".log", ".xml", ".html", ".htm", ".yaml", ".yml",
+    ".toml", ".ini", ".cfg", ".conf", ".env", ".rst",
+    ".tex", ".rtf", ".tsv", ".sql", ".py", ".js", ".ts",
+    ".java", ".c", ".cpp", ".h", ".hpp", ".go", ".rs",
+    ".rb", ".php", ".sh", ".bash", ".zsh", ".ps1",
+    ".css", ".scss", ".sass", ".less", ".vue", ".jsx", ".tsx",
+    ".kt", ".swift", ".m", ".mm", ".r", ".R", ".scala",
+    ".pl", ".pm", ".lua", ".hs", ".elm", ".clj", ".ex", ".exs",
+    ".erl", ".hrl", ".ml", ".mli", ".fs", ".fsi", ".fsx",
+}
+
+# Files that MAY need OCR (analysis required)
+ANALYZABLE_EXTENSIONS: Set[str] = {
+    ".pdf",   # Could be native or scanned
+    ".docx", ".doc",  # Could have embedded images
+    ".xlsx", ".xls",  # Could have image content
+    ".pptx", ".ppt",  # Presentations with images
+    ".odt", ".ods", ".odp",  # OpenDocument formats
+}
+
+# Files that ALWAYS need OCR (images)
+IMAGE_EXTENSIONS: Set[str] = {
+    ".png", ".jpg", ".jpeg", ".webp", ".tiff", ".tif",
+    ".bmp", ".gif", ".heic", ".heif", ".ico", ".svg",
+    ".raw", ".cr2", ".nef", ".arw", ".dng",
+}
+
+
+class OCRIngestionMode(Enum):
+    """
+    OCR ingestion mode for document processing.
+    
+    Determines which OCR provider to use during ingestion:
+    - QWEN: Use Qwen3-VL for OCR
+    - DEEPSEEK: Use DeepSeek OCR
+    - OFF: Skip OCR, only extract native text
+    - AUTO: System decides based on file analysis
+    """
+    QWEN = "qwen"
+    DEEPSEEK = "deepseek"
+    OFF = "off"
+    AUTO = "auto"
 
 
 class OCRMode(Enum):
@@ -37,6 +93,23 @@ class OCRMode(Enum):
     BASE = "base"
     LARGE = "large"
     GUNDAM = "gundam"  # Highest quality - uses Gundam Tiling
+
+
+@dataclass
+class DocumentOCRAnalysis:
+    """
+    Analysis result for AUTO mode decision.
+    
+    Contains the recommended OCR mode and scoring details.
+    """
+    recommended_mode: OCRIngestionMode
+    confidence: float  # 0.0 to 1.0 confidence in the recommendation
+    reasons: List[str]  # Explanation of why this mode was chosen
+    scores: Dict[str, float] = field(default_factory=dict)  # Individual factor scores
+    
+    def __str__(self) -> str:
+        reasons_str = "; ".join(self.reasons)
+        return f"OCRAnalysis(mode={self.recommended_mode.value}, confidence={self.confidence:.2f}, reasons=[{reasons_str}])"
 
 
 @dataclass
@@ -85,12 +158,277 @@ class OCRResult:
             self.metadata = {}
 
 
+class DocumentOCRAnalyzer:
+    """
+    Analyzes documents to determine if OCR would be beneficial.
+    
+    Used by AUTO mode to make intelligent decisions about OCR usage
+    based on file type, text density, scanned page ratio, and image presence.
+    """
+    
+    def __init__(self, config: Optional[RAGConfig] = None):
+        """
+        Initialize the analyzer.
+        
+        Args:
+            config: RAG configuration with AUTO mode settings
+        """
+        self._config = config or get_settings()
+        self._threshold = self._config.rag_ocr_auto_threshold
+        self._preferred = self._config.rag_ocr_auto_preferred.lower()
+    
+    def analyze_file_path(self, file_path: str) -> DocumentOCRAnalysis:
+        """
+        Quick analysis based on file extension only.
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            DocumentOCRAnalysis with recommendation
+        """
+        ext = Path(file_path).suffix.lower()
+        
+        # Pure text files - NEVER need OCR
+        if ext in TEXT_ONLY_EXTENSIONS:
+            return DocumentOCRAnalysis(
+                recommended_mode=OCRIngestionMode.OFF,
+                confidence=1.0,
+                reasons=[f"File extension '{ext}' is a text-only format"],
+                scores={"file_type": -1.0},
+            )
+        
+        # Image files - ALWAYS need OCR
+        if ext in IMAGE_EXTENSIONS:
+            preferred_mode = self._get_preferred_mode()
+            return DocumentOCRAnalysis(
+                recommended_mode=preferred_mode,
+                confidence=1.0,
+                reasons=[f"File extension '{ext}' is an image format"],
+                scores={"file_type": 1.0},
+            )
+        
+        # Analyzable files - need deeper analysis
+        if ext in ANALYZABLE_EXTENSIONS:
+            return DocumentOCRAnalysis(
+                recommended_mode=OCRIngestionMode.AUTO,  # Needs content analysis
+                confidence=0.5,
+                reasons=[f"File extension '{ext}' requires content analysis"],
+                scores={"file_type": 0.0},
+            )
+        
+        # Unknown extension - assume no OCR needed
+        return DocumentOCRAnalysis(
+            recommended_mode=OCRIngestionMode.OFF,
+            confidence=0.7,
+            reasons=[f"Unknown file extension '{ext}', assuming text-based"],
+            scores={"file_type": -0.5},
+        )
+    
+    def analyze_document(self, document: "LoadedDocument") -> DocumentOCRAnalysis:
+        """
+        Full analysis of a loaded document.
+        
+        Analyzes text density, scanned page ratio, and image presence
+        to determine if OCR would be beneficial.
+        
+        Args:
+            document: Loaded document with page content
+            
+        Returns:
+            DocumentOCRAnalysis with recommendation and scoring details
+        """
+        ext = Path(document.file_path).suffix.lower()
+        reasons: List[str] = []
+        scores: Dict[str, float] = {}
+        
+        # 1. File type scoring (25% weight)
+        if ext in TEXT_ONLY_EXTENSIONS:
+            scores["file_type"] = -1.0
+            reasons.append(f"Text-only format ({ext})")
+            # Early return for text files
+            return DocumentOCRAnalysis(
+                recommended_mode=OCRIngestionMode.OFF,
+                confidence=1.0,
+                reasons=reasons,
+                scores=scores,
+            )
+        elif ext in IMAGE_EXTENSIONS:
+            scores["file_type"] = 1.0
+            reasons.append(f"Image format ({ext})")
+            # Early return for images
+            return DocumentOCRAnalysis(
+                recommended_mode=self._get_preferred_mode(),
+                confidence=1.0,
+                reasons=reasons,
+                scores=scores,
+            )
+        else:
+            scores["file_type"] = 0.0
+            reasons.append(f"Analyzable format ({ext})")
+        
+        # 2. Text density scoring (30% weight)
+        total_chars = sum(len(page.text.strip()) for page in document.pages)
+        total_pages = len(document.pages) or 1
+        chars_per_page = total_chars / total_pages
+        
+        # Low text density suggests scanned content
+        if chars_per_page < 100:
+            scores["text_density"] = 1.0
+            reasons.append(f"Very low text density ({chars_per_page:.0f} chars/page)")
+        elif chars_per_page < 500:
+            scores["text_density"] = 0.5
+            reasons.append(f"Low text density ({chars_per_page:.0f} chars/page)")
+        elif chars_per_page < 1000:
+            scores["text_density"] = 0.0
+            reasons.append(f"Moderate text density ({chars_per_page:.0f} chars/page)")
+        else:
+            scores["text_density"] = -0.5
+            reasons.append(f"High text density ({chars_per_page:.0f} chars/page)")
+        
+        # 3. Scanned page ratio scoring (25% weight)
+        scanned_pages = sum(1 for page in document.pages if page.is_scanned)
+        scanned_ratio = scanned_pages / total_pages if total_pages > 0 else 0
+        
+        if scanned_ratio >= 0.8:
+            scores["scanned_ratio"] = 1.0
+            reasons.append(f"Most pages are scanned ({scanned_ratio:.0%})")
+        elif scanned_ratio >= 0.5:
+            scores["scanned_ratio"] = 0.6
+            reasons.append(f"Many pages are scanned ({scanned_ratio:.0%})")
+        elif scanned_ratio >= 0.2:
+            scores["scanned_ratio"] = 0.3
+            reasons.append(f"Some pages are scanned ({scanned_ratio:.0%})")
+        else:
+            scores["scanned_ratio"] = -0.5
+            reasons.append(f"Few/no scanned pages ({scanned_ratio:.0%})")
+        
+        # 4. Image presence scoring (20% weight)
+        pages_with_images = sum(1 for page in document.pages if page.has_images)
+        image_ratio = pages_with_images / total_pages if total_pages > 0 else 0
+        
+        if image_ratio >= 0.8:
+            scores["image_presence"] = 0.8
+            reasons.append(f"Most pages have images ({image_ratio:.0%})")
+        elif image_ratio >= 0.5:
+            scores["image_presence"] = 0.5
+            reasons.append(f"Many pages have images ({image_ratio:.0%})")
+        elif image_ratio >= 0.2:
+            scores["image_presence"] = 0.2
+            reasons.append(f"Some pages have images ({image_ratio:.0%})")
+        else:
+            scores["image_presence"] = 0.0
+            reasons.append(f"Few/no images ({image_ratio:.0%})")
+        
+        # Calculate final weighted score
+        final_score = (
+            scores["file_type"] * 0.25 +
+            scores["text_density"] * 0.30 +
+            scores["scanned_ratio"] * 0.25 +
+            scores["image_presence"] * 0.20
+        )
+        
+        # Make decision based on threshold
+        if final_score >= self._threshold:
+            recommended_mode = self._get_preferred_mode()
+            confidence = min(0.5 + final_score, 1.0)
+            reasons.insert(0, f"OCR recommended (score={final_score:.2f} >= threshold={self._threshold})")
+        else:
+            recommended_mode = OCRIngestionMode.OFF
+            confidence = min(0.5 + abs(final_score), 1.0)
+            reasons.insert(0, f"OCR not needed (score={final_score:.2f} < threshold={self._threshold})")
+        
+        return DocumentOCRAnalysis(
+            recommended_mode=recommended_mode,
+            confidence=confidence,
+            reasons=reasons,
+            scores=scores,
+        )
+    
+    def _get_preferred_mode(self) -> OCRIngestionMode:
+        """Get the preferred OCR mode from configuration."""
+        if self._preferred == "deepseek":
+            return OCRIngestionMode.DEEPSEEK
+        return OCRIngestionMode.QWEN
+
+
+def resolve_ocr_mode(
+    mode: str,
+    document: Optional["LoadedDocument"] = None,
+    file_path: Optional[str] = None,
+    config: Optional[RAGConfig] = None,
+) -> Tuple[OCRIngestionMode, Optional[DocumentOCRAnalysis]]:
+    """
+    Resolve the effective OCR mode for a document.
+    
+    Handles AUTO mode resolution and backward compatibility.
+    
+    Args:
+        mode: OCR mode string from configuration
+        document: Optional loaded document for content analysis
+        file_path: Optional file path for extension-based analysis
+        config: Optional RAG configuration
+        
+    Returns:
+        Tuple of (resolved OCRIngestionMode, analysis if AUTO mode was used)
+    """
+    config = config or get_settings()
+    mode_lower = mode.lower()
+    
+    # Handle backward compatibility with rag_deepseek_ocr_enabled
+    if mode_lower == "auto" and config.rag_deepseek_ocr_enabled:
+        # Legacy setting takes precedence when mode is auto
+        logger.debug("Using legacy rag_deepseek_ocr_enabled=True setting")
+        return OCRIngestionMode.DEEPSEEK, None
+    
+    # Direct mode mapping
+    if mode_lower == "qwen":
+        return OCRIngestionMode.QWEN, None
+    elif mode_lower == "deepseek":
+        return OCRIngestionMode.DEEPSEEK, None
+    elif mode_lower == "off":
+        return OCRIngestionMode.OFF, None
+    elif mode_lower == "auto":
+        # Perform AUTO analysis
+        analyzer = DocumentOCRAnalyzer(config)
+        
+        if document is not None:
+            analysis = analyzer.analyze_document(document)
+        elif file_path is not None:
+            analysis = analyzer.analyze_file_path(file_path)
+        else:
+            # No context, use preferred mode
+            analysis = DocumentOCRAnalysis(
+                recommended_mode=analyzer._get_preferred_mode(),
+                confidence=0.5,
+                reasons=["No document context, using preferred OCR provider"],
+            )
+        
+        logger.info(f"AUTO OCR analysis: {analysis}")
+        
+        # Recurse if analysis returned AUTO (needs content analysis)
+        if analysis.recommended_mode == OCRIngestionMode.AUTO:
+            return analyzer._get_preferred_mode(), analysis
+        
+        return analysis.recommended_mode, analysis
+    
+    # Unknown mode, default to OFF
+    logger.warning(f"Unknown OCR mode '{mode}', defaulting to OFF")
+    return OCRIngestionMode.OFF, None
+
+
 class OCRProcessor:
     """
     Process images and scanned documents with OCR.
     
-    Uses Qwen3-VL via OpenAI-compatible endpoint with configurable modes and retry logic.
-    Falls back to higher quality modes if confidence is low.
+    Uses Qwen3-VL or DeepSeek via OpenAI-compatible endpoint with configurable
+    modes and retry logic. Falls back to higher quality modes if confidence is low.
+    
+    Supports OCRIngestionMode for selecting OCR provider:
+    - QWEN: Qwen3-VL OCR
+    - DEEPSEEK: DeepSeek OCR
+    - OFF: No OCR processing
+    - AUTO: Intelligent selection based on document analysis
     
     Gundam Mode:
         When mode="gundam" or for images > min_image_size pixels,
@@ -105,9 +443,10 @@ class OCRProcessor:
         retry_limit: int = 2,
         endpoint: Optional[str] = None,
         model: Optional[str] = None,
-    timeout: Optional[float] = None,
+        timeout: Optional[float] = None,
         gundam_config: Optional[GundamTilingConfig] = None,
         settings: Optional[RAGConfig] = None,
+        ingestion_mode: Optional[OCRIngestionMode] = None,
     ):
         """
         Initialize OCR processor.
@@ -121,13 +460,24 @@ class OCRProcessor:
             timeout: Request timeout in seconds
             gundam_config: Configuration for Gundam Tiling strategy
             settings: Optional Settings object
+            ingestion_mode: OCR ingestion mode (QWEN, DEEPSEEK, OFF, AUTO)
         """
         self._settings = settings or get_settings()
         
         self.mode = mode
         self.confidence_threshold = confidence_threshold
         self.retry_limit = retry_limit
-        if self._settings.rag_deepseek_ocr_enabled:
+        
+        # Determine OCR provider based on ingestion_mode or legacy settings
+        self.ingestion_mode = ingestion_mode
+        if ingestion_mode == OCRIngestionMode.DEEPSEEK:
+            default_endpoint = self._settings.rag_deepseek_ocr_api_base
+            default_model = self._settings.rag_deepseek_ocr_model
+        elif ingestion_mode == OCRIngestionMode.QWEN:
+            default_endpoint = self._settings.rag_ocr_api_base
+            default_model = self._settings.rag_ocr_model
+        elif self._settings.rag_deepseek_ocr_enabled:
+            # Legacy compatibility
             default_endpoint = self._settings.rag_deepseek_ocr_api_base
             default_model = self._settings.rag_deepseek_ocr_model
         else:
@@ -159,6 +509,30 @@ class OCRProcessor:
         self._total_failures = 0
         self._total_latency = 0.0
     
+    @classmethod
+    def create_for_mode(
+        cls,
+        ingestion_mode: OCRIngestionMode,
+        settings: Optional[RAGConfig] = None,
+        **kwargs,
+    ) -> "OCRProcessor":
+        """
+        Factory method to create an OCRProcessor for a specific ingestion mode.
+        
+        Args:
+            ingestion_mode: The OCR ingestion mode to use
+            settings: Optional RAG configuration
+            **kwargs: Additional arguments passed to __init__
+            
+        Returns:
+            Configured OCRProcessor instance
+        """
+        return cls(
+            ingestion_mode=ingestion_mode,
+            settings=settings,
+            **kwargs,
+        )
+    
     async def process_image(
         self,
         image_data: bytes,
@@ -175,6 +549,18 @@ class OCRProcessor:
             OCRResult with extracted text and confidence
         """
         start_time = time.perf_counter()
+        
+        # Check if OCR is disabled
+        if self.ingestion_mode == OCRIngestionMode.OFF:
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                has_tables=False,
+                tables=[],
+                mode_used="off",
+                metadata={"skipped": True, "reason": "OCR mode is OFF"},
+                latency_ms=(time.perf_counter() - start_time) * 1000,
+            )
         
         if not self.endpoint:
             # Fallback to local OCR or return placeholder
@@ -259,9 +645,9 @@ class OCRProcessor:
         context: Optional[str] = None,
     ) -> OCRResult:
         """
-        Call the OCR API using OpenAI-compatible vision endpoint (Qwen3-VL).
+        Call the OCR API using OpenAI-compatible vision endpoint.
         
-        For Qwen3-VL, mode is ignored since we use a single model.
+        Supports both Qwen3-VL and DeepSeek OCR endpoints.
         Uses tenacity retry for transient network errors.
         """
         network_retry_count = 0
@@ -308,8 +694,8 @@ class OCRProcessor:
                         ],
                     }
                 ],
-                "max_tokens": 2048,  # Reduced from 4096 to leave room for input tokens
-                "temperature": 0.1,  # Low temperature for accurate OCR
+                "max_tokens": 2048,
+                "temperature": 0.1,
             }
 
             # Call OpenAI-compatible endpoint
@@ -372,7 +758,7 @@ class OCRProcessor:
                 elif "text" in choice:
                     text = choice["text"]
 
-            # Estimate confidence based on text quality (no API confidence available)
+            # Estimate confidence based on text quality
             confidence = self._estimate_confidence(text)
 
             # Extract tables if present

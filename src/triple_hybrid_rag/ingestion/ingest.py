@@ -28,7 +28,13 @@ from triple_hybrid_rag.config import RAGConfig
 from triple_hybrid_rag.core.chunker import HierarchicalChunker
 from triple_hybrid_rag.core.embedder import MultimodalEmbedder
 from triple_hybrid_rag.ingestion.loaders import DocumentLoader, FileType, LoadedDocument
-from triple_hybrid_rag.ingestion.ocr import OCRProcessor, OCRResult
+from triple_hybrid_rag.ingestion.ocr import (
+    OCRProcessor,
+    OCRResult,
+    OCRIngestionMode,
+    DocumentOCRAnalyzer,
+    resolve_ocr_mode,
+)
 from triple_hybrid_rag.types import ChildChunk, ParentChunk
 
 logger = logging.getLogger(__name__)
@@ -376,11 +382,52 @@ class Ingestor:
         document: LoadedDocument,
         stats: IngestStats,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        ocr_mode_override: Optional[str] = None,
     ) -> None:
-        """Process OCR for pages that need it."""
+        """
+        Process OCR for pages that need it.
+        
+        Uses the rag_ocr_mode configuration to determine OCR behavior:
+        - QWEN: Use Qwen3-VL for OCR
+        - DEEPSEEK: Use DeepSeek OCR
+        - OFF: Skip OCR processing entirely
+        - AUTO: Analyze document to decide if OCR is needed
+        
+        Args:
+            document: The loaded document with pages
+            stats: Statistics tracker
+            progress_callback: Optional progress callback
+            ocr_mode_override: Override the configured OCR mode
+        """
+        # Resolve the effective OCR mode
+        mode_str = ocr_mode_override or self.config.rag_ocr_mode
+        resolved_mode, analysis = resolve_ocr_mode(
+            mode=mode_str,
+            document=document,
+            file_path=document.file_path,
+            config=self.config,
+        )
+        
+        # Log the decision
+        if analysis:
+            logger.info(f"OCR mode decision: {analysis}")
+        else:
+            logger.info(f"OCR mode: {resolved_mode.value}")
+        
+        # Skip OCR if mode is OFF
+        if resolved_mode == OCRIngestionMode.OFF:
+            logger.debug("OCR is disabled, skipping OCR processing")
+            return
+        
+        # Create an OCR processor for the resolved mode
+        ocr_processor = OCRProcessor.create_for_mode(
+            ingestion_mode=resolved_mode,
+            settings=self.config,
+        )
+        
         for i, page in enumerate(document.pages):
             if page.is_scanned and page.image_data:
-                result = await self.ocr_processor.process_image(page.image_data)
+                result = await ocr_processor.process_image(page.image_data)
                 
                 if result.text and not result.error:
                     # Append OCR text to page

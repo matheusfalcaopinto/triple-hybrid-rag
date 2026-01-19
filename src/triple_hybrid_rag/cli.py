@@ -19,6 +19,12 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--tenant", default="default", help="Tenant identifier")
     ingest.add_argument("--collection", default="general", help="Collection name")
     ingest.add_argument("--title", default=None, help="Document title")
+    ingest.add_argument(
+        "--ocr-mode",
+        choices=["qwen", "deepseek", "off", "auto"],
+        default=None,
+        help="OCR mode: qwen (Qwen3-VL), deepseek (DeepSeek OCR), off (no OCR), auto (system decides)",
+    )
 
     retrieve = subparsers.add_parser("retrieve", help="Run a retrieval query")
     retrieve.add_argument("query", type=str, help="User query")
@@ -30,7 +36,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _run_ingest(args: argparse.Namespace) -> None:
-    rag = RAG(get_settings())
+    settings = get_settings()
+    
+    # Override OCR mode if specified via CLI
+    if args.ocr_mode:
+        settings.rag_ocr_mode = args.ocr_mode
+    
+    rag = RAG(settings)
     try:
         result = await rag.ingest(
             file_path=args.file,
