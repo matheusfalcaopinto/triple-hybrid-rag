@@ -56,6 +56,8 @@ class RRFFusion:
         graph_results: List[SearchResult],
         query_plan: Optional[QueryPlan] = None,
         top_k: Optional[int] = None,
+        apply_safety: bool = True,
+        apply_denoise: Optional[bool] = None,
     ) -> List[SearchResult]:
         """
         Fuse results from all three channels using weighted RRF.
@@ -147,10 +149,14 @@ class RRFFusion:
         fused_results.sort(key=lambda r: r.rrf_score, reverse=True)
         
         # Apply safety threshold filtering
-        fused_results = self._apply_safety_threshold(fused_results)
-        
+        if apply_safety:
+            fused_results = self._apply_safety_threshold(fused_results)
+
         # Apply conformal denoising
-        if self.denoise_enabled:
+        if apply_denoise is None:
+            apply_denoise = self.denoise_enabled
+
+        if apply_denoise:
             fused_results = self._apply_conformal_denoising(fused_results)
         
         # Return top_k

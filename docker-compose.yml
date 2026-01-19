@@ -21,7 +21,7 @@ services:
     ports:
       - "54332:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - /mnt/raid0/triple-hybrid-rag/postgres:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d rag_db"]
@@ -39,18 +39,20 @@ services:
   #   - 8091: Web UI
   # ─────────────────────────────────────────────────────────────────────────────
   puppygraph:
-    image: puppygraph/puppygraph:latest
+    image: puppygraph/puppygraph:stable
     container_name: triple-hybrid-rag-puppygraph
     restart: unless-stopped
     environment:
       PUPPYGRAPH_USERNAME: admin
       PUPPYGRAPH_PASSWORD: puppygraph123
+      STORAGE_PATH_ROOT: /data/storage
     ports:
       - "7697:7687"   # Bolt protocol (mapped to 7697 externally)
       - "8192:8182"   # HTTP API (mapped to 8192 externally)
       - "8091:8081"   # Web UI (mapped to 8091 externally)
     volumes:
       - ./infrastructure/puppygraph/schema.json:/app/schema.json:ro
+      - /mnt/raid0/triple-hybrid-rag/puppygraph:/data/storage
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,10 +64,6 @@ services:
       --puppygraph.data-source.postgres.user=postgres
       --puppygraph.data-source.postgres.password=postgres
       --puppygraph.data-source.postgres.database=rag_db
-
-volumes:
-  postgres_data:
-    name: triple-hybrid-rag-postgres-data
 
 networks:
   rag-network:

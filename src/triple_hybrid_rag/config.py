@@ -58,7 +58,11 @@ class RAGConfig(BaseSettings):
         default="qwen3-vl-embedding-2b",
         description="Embedding model name",
     )
-    rag_embed_batch_size: int = Field(default=20, description="Batch size for embeddings")
+    rag_embed_batch_size: int = Field(default=200, description="Batch size for embeddings")
+    rag_embed_concurrent_batches: int = Field(
+        default=8,
+        description="Number of concurrent embedding batches",
+    )
     rag_embed_timeout: float = Field(default=60.0, description="Embedding request timeout")
     rag_embed_dim_model: int = Field(
         default=2048,
@@ -152,6 +156,64 @@ class RAGConfig(BaseSettings):
         default=True,
         description="Enable direct image embeddings",
     )
+
+    # Ingestion retry settings
+    rag_ingest_embed_retry_attempts: int = Field(
+        default=3,
+        description="Retry attempts for embedding API calls during ingestion",
+    )
+    rag_ingest_db_retry_attempts: int = Field(
+        default=3,
+        description="Retry attempts for database writes during ingestion",
+    )
+    rag_ingest_retry_backoff_min: float = Field(
+        default=1.0,
+        description="Minimum backoff (seconds) for ingestion retries",
+    )
+    rag_ingest_retry_backoff_max: float = Field(
+        default=10.0,
+        description="Maximum backoff (seconds) for ingestion retries",
+    )
+    rag_db_batch_size: int = Field(
+        default=1000,
+        description="Batch size for database inserts (reduces network round-trips)",
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # EMBEDDING CACHE
+    # ═══════════════════════════════════════════════════════════════════════════
+    rag_embedding_cache_enabled: bool = Field(
+        default=True,
+        description="Enable embedding cache to skip re-embedding identical content",
+    )
+    rag_embedding_cache_backend: str = Field(
+        default="memory",
+        description="Cache backend: 'memory' (in-process) or 'redis' (distributed)",
+    )
+    rag_embedding_cache_max_size: int = Field(
+        default=100_000,
+        description="Max embeddings to cache (memory backend only)",
+    )
+    rag_embedding_cache_ttl: int = Field(
+        default=604800,  # 7 days
+        description="Cache TTL in seconds (redis backend only)",
+    )
+    rag_embedding_cache_redis_url: str = Field(
+        default="redis://localhost:6379",
+        description="Redis URL for distributed embedding cache",
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PIPELINED INGESTION
+    # ═══════════════════════════════════════════════════════════════════════════
+    rag_pipeline_enabled: bool = Field(
+        default=True,
+        description="Enable pipelined (overlapping) ingestion for large documents",
+    )
+    rag_pipeline_queue_size: int = Field(
+        default=10,
+        description="Max batches to buffer between pipeline stages",
+    )
     
     # Chunking features
     rag_parent_child_chunking: bool = Field(
@@ -220,6 +282,14 @@ class RAGConfig(BaseSettings):
     # ═══════════════════════════════════════════════════════════════════════════
     rag_ner_model: str = Field(default="gpt-5", description="NER model")
     rag_ner_temperature: float = Field(default=0.0, description="NER temperature")
+    rag_ner_max_chunks_per_request: int = Field(
+        default=8,
+        description="Max chunks per NER request",
+    )
+    rag_ner_max_chars_per_chunk: int = Field(
+        default=2000,
+        description="Max characters per chunk sent to NER",
+    )
     rag_entity_types: str = Field(
         default="PERSON,ORGANIZATION,PRODUCT,CLAUSE,DATE,MONEY,LOCATION,TECHNICAL_TERM",
         description="Comma-separated list of entity types to extract",

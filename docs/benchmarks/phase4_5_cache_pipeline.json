@@ -1,0 +1,84 @@
+{
+  "timestamp": "2026-01-17T05:30:37.917377",
+  "system_info": {
+    "platform": "Linux-6.14.0-37-generic-x86_64-with-glibc2.39",
+    "python_version": "3.13.5",
+    "processor": "x86_64",
+    "cpu_count": 12
+  },
+  "test_data_info": {
+    "text_length": 1015786,
+    "text_lines": 10345,
+    "num_embedding_chunks": 2000
+  },
+  "results": [
+    {
+      "name": "token_estimation",
+      "duration_seconds": 0.0018429069896228611,
+      "items_processed": 1000,
+      "rate_per_second": 542620.9817591736,
+      "memory_mb": 0.0011568069458007812,
+      "metadata": {
+        "text_length": 1000
+      }
+    },
+    {
+      "name": "parent_chunking",
+      "duration_seconds": 2.1059344559907913,
+      "items_processed": 204,
+      "rate_per_second": 96.86911167613853,
+      "memory_mb": 7.985815048217773,
+      "metadata": {
+        "text_length": 1015786,
+        "text_lines": 10345
+      }
+    },
+    {
+      "name": "full_chunking",
+      "duration_seconds": 3.0892413040273823,
+      "items_processed": 1292,
+      "rate_per_second": 418.2256654135905,
+      "memory_mb": 8.82154369354248,
+      "metadata": {
+        "parent_chunks": 204,
+        "child_chunks": 1292,
+        "text_length": 1015786
+      }
+    },
+    {
+      "name": "recursive_split_stress",
+      "duration_seconds": 1.8935858079930767,
+      "items_processed": 1981,
+      "rate_per_second": 1046.1633117643448,
+      "memory_mb": 7.070091247558594,
+      "metadata": {
+        "chunk_count": 1981
+      }
+    },
+    {
+      "name": "embedding_simulation_sequential",
+      "duration_seconds": 5.0296258549788035,
+      "items_processed": 2000,
+      "rate_per_second": 397.64389194480725,
+      "memory_mb": 15.750106811523438,
+      "metadata": {
+        "batch_size": 20,
+        "simulated_latency_ms": 50,
+        "num_batches": 100
+      }
+    },
+    {
+      "name": "deduplication",
+      "duration_seconds": 0.006434971990529448,
+      "items_processed": 2000,
+      "rate_per_second": 310801.66361927654,
+      "memory_mb": 0.2993173599243164,
+      "metadata": {
+        "input_chunks": 2000,
+        "unique_chunks": 1600,
+        "duplicates_removed": 400
+      }
+    }
+  ],
+  "total_duration_seconds": 12.562672530009877
+}

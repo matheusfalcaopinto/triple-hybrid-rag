@@ -112,13 +112,16 @@ cp .env.example .env
 ### 4. Use the Library
 
 ```python
-from triple_hybrid_rag import RAGConfig, get_settings
+from triple_hybrid_rag import RAG, RAGConfig, get_settings
 from triple_hybrid_rag.core import HierarchicalChunker, MultimodalEmbedder
 
 # Initialize components
 config = get_settings()
 chunker = HierarchicalChunker(config)
 embedder = MultimodalEmbedder(config)
+
+# Or use the high-level orchestrator
+rag = RAG(config)
 
 # Chunk a document
 text = open("document.txt").read()
@@ -129,6 +132,8 @@ children = await embedder.embed_chunks(children)
 
 # ... store in database, then retrieve
 ```
+
+> **Note:** `RAG.ingest(...)` currently supports `.txt` and `.md` files.
 
 ## 📦 Project Structure
 
@@ -264,6 +269,27 @@ records = await client.query_cypher(
     "MATCH (e:Entity)-[:MENTIONED_IN]->(c:Chunk) RETURN c",
     params={"tenant_id": "my-tenant"},
 )
+```
+
+### EntityRelationExtractor (NER + RE)
+
+```python
+from triple_hybrid_rag.core import EntityRelationExtractor, GraphEntityStore
+
+extractor = EntityRelationExtractor()
+store = GraphEntityStore()
+
+# Extract entities + relations from child chunks
+result = await extractor.extract(child_chunks)
+
+# Persist to PostgreSQL (rag_entities, rag_relations, rag_entity_mentions)
+stats = await store.store(
+    result,
+    chunks=child_chunks,
+    tenant_id="my-tenant",
+    document_id=document_id,
+)
+print(stats)
 ```
 
 ### RRFFusion

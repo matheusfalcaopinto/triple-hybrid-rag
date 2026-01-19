@@ -13,7 +13,13 @@ from uuid import uuid4
 
 # Import from the library
 from triple_hybrid_rag import RAGConfig, get_settings
-from triple_hybrid_rag.core import HierarchicalChunker, MultimodalEmbedder, RRFFusion
+from triple_hybrid_rag.core import (
+    HierarchicalChunker,
+    MultimodalEmbedder,
+    RRFFusion,
+    EntityRelationExtractor,
+    GraphEntityStore,
+)
 from triple_hybrid_rag.types import SearchResult, SearchChannel
 
 
@@ -122,6 +128,19 @@ async def main():
     print("  children = await embedder.embed_chunks(child_chunks)")
     print()
     print("Each child chunk would have a 1024-dimensional embedding vector.")
+    print()
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 3.5 ENTITY + RELATION EXTRACTION (simulated)
+    # ═══════════════════════════════════════════════════════════════════════════
+    print("Entity + Relation Extraction (simulated)")
+    print("=" * 50)
+    print("In a real scenario, you would extract entities/relations like this:")
+    print()
+    print("  extractor = EntityRelationExtractor(config)")
+    print("  store = GraphEntityStore(config)")
+    print("  result = await extractor.extract(child_chunks)")
+    print("  await store.store(result, child_chunks, tenant_id, document_id)")
     print()
     
     # ═══════════════════════════════════════════════════════════════════════════

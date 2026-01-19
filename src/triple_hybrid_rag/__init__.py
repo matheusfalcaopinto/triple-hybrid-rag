@@ -26,6 +26,7 @@ __author__ = "Triple-Hybrid-RAG Team"
 
 # Core exports
 from triple_hybrid_rag.config import RAGConfig, get_settings
+from triple_hybrid_rag.rag import RAG
 
 # Type exports
 from triple_hybrid_rag.types import (
@@ -38,6 +39,7 @@ from triple_hybrid_rag.types import (
     RetrievalResult,
     QueryPlan,
 )
+from triple_hybrid_rag.core import EntityRelationExtractor, GraphEntityStore
 
 __all__ = [
     # Version
@@ -45,6 +47,7 @@ __all__ = [
     # Config
     "RAGConfig",
     "get_settings",
+    "RAG",
     # Types
     "Document",
     "ParentChunk",
@@ -54,4 +57,6 @@ __all__ = [
     "SearchResult",
     "RetrievalResult",
     "QueryPlan",
+    "EntityRelationExtractor",
+    "GraphEntityStore",
 ]

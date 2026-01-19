@@ -363,20 +363,21 @@ class PuppyGraphClient:
             for kw in keywords
         ])
         
+        # PuppyGraph doesn't support DISTINCT with aggregates
+        # Use simple query without aggregation
         cypher = f"""
         MATCH (e:Entity)
         WHERE e.tenant_id = $tenant_id
           AND ({keyword_conditions})
         MATCH (e)-[:MENTIONED_IN]->(c:Chunk)
-        RETURN DISTINCT
+        RETURN
             c.id as chunk_id,
             c.parent_id as parent_id,
             c.document_id as document_id,
             c.text as text,
             c.page as page,
             c.modality as modality,
-            count(e) as match_count
-        ORDER BY match_count DESC
+            e.name as entity_name
         LIMIT $limit
         """
         
@@ -386,13 +387,21 @@ class PuppyGraphClient:
                 "limit": limit,
             })
             
-            results = []
+            # Deduplicate by chunk_id and count matches
+            chunk_map: Dict[str, Dict] = {}
             for r in records:
-                result = self._record_to_search_result(r)
-                result.graph_score = r.get("match_count", 1) / len(keywords)
+                cid = r.get("chunk_id")
+                if cid not in chunk_map:
+                    chunk_map[cid] = {"record": r, "count": 0}
+                chunk_map[cid]["count"] += 1
+            
+            results = []
+            for data in sorted(chunk_map.values(), key=lambda x: x["count"], reverse=True):
+                result = self._record_to_search_result(data["record"])
+                result.graph_score = data["count"] / len(keywords)
                 results.append(result)
             
-            return results
+            return results[:limit]
         except Exception as e:
             logger.error(f"Keyword graph search failed: {e}")
             return []

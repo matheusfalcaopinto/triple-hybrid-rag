@@ -1,0 +1,93 @@
+{
+  "timestamp": "2026-01-17T05:46:59.367703+00:00",
+  "system_info": {
+    "platform": "Linux-6.14.0-37-generic-x86_64-with-glibc2.39",
+    "python_version": "3.13.5",
+    "processor": "x86_64",
+    "cpu_count": 12
+  },
+  "config_info": {
+    "embed_api_base": "http://127.0.0.1:1234/v1",
+    "embed_model": "Qwen/Qwen3-VL-Embedding-2B",
+    "embed_batch_size": 200,
+    "embed_concurrent_batches": 8,
+    "embed_dim_model": 2048,
+    "embed_dim_store": 1024,
+    "matryoshka_enabled": true,
+    "cache_enabled": true,
+    "cache_backend": "memory",
+    "pipeline_enabled": true
+  },
+  "test_data_info": {
+    "text_length": 529942,
+    "text_lines": 5170,
+    "chunks_for_embedding": 500
+  },
+  "results": [
+    {
+      "name": "chunking",
+      "duration_seconds": 1.5959444380132481,
+      "items_processed": 675,
+      "rate_per_second": 422.94705499916455,
+      "memory_mb": 5.427008628845215,
+      "metadata": {
+        "parent_chunks": 100,
+        "child_chunks": 675
+      }
+    },
+    {
+      "name": "embedding_sequential",
+      "duration_seconds": 5.591356800985523,
+      "items_processed": 500,
+      "rate_per_second": 89.42373341509361,
+      "memory_mb": 0.0,
+      "metadata": {
+        "method": "sequential"
+      }
+    },
+    {
+      "name": "embedding_concurrent",
+      "duration_seconds": 0.9367312529939227,
+      "items_processed": 500,
+      "rate_per_second": 533.7710238682982,
+      "memory_mb": 0.0,
+      "metadata": {
+        "method": "concurrent",
+        "speedup": "5.97x"
+      }
+    },
+    {
+      "name": "embedding_cache_effectiveness",
+      "duration_seconds": 1.1529679510276765,
+      "items_processed": 400,
+      "rate_per_second": 346.9307187970554,
+      "memory_mb": 33.80118370056152,
+      "metadata": {
+        "total_texts": 200,
+        "unique_texts": 140,
+        "duplicate_ratio": 0.3,
+        "first_pass_hits": 0,
+        "first_pass_misses": 200,
+        "total_hits": 200,
+        "total_misses": 200,
+        "final_hit_rate": 0.5
+      }
+    },
+    {
+      "name": "full_pipeline",
+      "duration_seconds": 1.5116804640274495,
+      "items_processed": 500,
+      "rate_per_second": 330.757730815605,
+      "memory_mb": 0.0,
+      "metadata": {
+        "stages": "chunking + embedding"
+      }
+    }
+  ],
+  "cache_stats": {
+    "hits": 200,
+    "misses": 200,
+    "evictions": 0
+  },
+  "total_duration_seconds": 11.196211187983863
+}

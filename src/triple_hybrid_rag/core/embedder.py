@@ -6,13 +6,20 @@ Supports:
 - Image embeddings for direct multimodal retrieval
 - Mixed text+image embeddings
 - Matryoshka truncation (2048d → 1024d)
+
+Optimizations:
+- Concurrent batch embedding with aiohttp connection pooling
+- Configurable concurrency (default: 8 parallel batches)
+- Progress callback support for long-running operations
 """
 
+import asyncio
 import base64
 import logging
-from io import BytesIO
-from typing import List, Optional, Union
+from dataclasses import dataclass
+from typing import Callable, List, Optional, Union
 
+import aiohttp
 import httpx
 import numpy as np
 
@@ -80,6 +87,7 @@ class MultimodalEmbedder:
         self,
         texts: List[str],
         normalize: bool = True,
+        raise_on_error: bool = False,
     ) -> List[List[float]]:
         """
         Embed a list of texts.
@@ -128,6 +136,8 @@ class MultimodalEmbedder:
                 
             except httpx.HTTPError as e:
                 logger.error(f"Embedding API error: {e}")
+                if raise_on_error:
+                    raise
                 # Return zero embeddings for failed batch
                 all_embeddings.extend([[0.0] * self.dim_store] * len(batch))
         
@@ -329,3 +339,172 @@ class MultimodalEmbedder:
             return 0.0
         
         return float(np.dot(arr1, arr2) / (norm1 * norm2))
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CONCURRENT EMBEDDING (OPTIMIZATION)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    async def _embed_batch_aiohttp(
+        self,
+        session: aiohttp.ClientSession,
+        batch: List[str],
+        batch_index: int,
+    ) -> tuple[int, List[List[float]]]:
+        """
+        Embed a single batch using aiohttp (for concurrent processing).
+        
+        Returns:
+            Tuple of (batch_index, embeddings) for ordered reconstruction
+        """
+        try:
+            async with session.post(
+                f"{self.api_base}/embeddings",
+                json={
+                    "model": self.model,
+                    "input": batch,
+                    "encoding_format": "float",
+                },
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"Embedding batch {batch_index} failed: {error_text}")
+                    return (batch_index, [[0.0] * self.dim_store] * len(batch))
+                
+                data = await response.json()
+                embeddings = [item["embedding"] for item in data["data"]]
+                
+                # Apply Matryoshka truncation and normalization
+                embeddings = [self._truncate_embedding(e) for e in embeddings]
+                embeddings = [self._normalize(e) for e in embeddings]
+                
+                return (batch_index, embeddings)
+                
+        except Exception as e:
+            logger.error(f"Embedding batch {batch_index} error: {e}")
+            return (batch_index, [[0.0] * self.dim_store] * len(batch))
+    
+    async def embed_texts_concurrent(
+        self,
+        texts: List[str],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> List[List[float]]:
+        """
+        Embed texts with concurrent batch processing using aiohttp.
+        
+        OPTIMIZATION: Sends multiple batches in parallel to maximize GPU utilization.
+        Uses connection pooling for efficient HTTP handling.
+        
+        Args:
+            texts: List of text strings to embed
+            progress_callback: Optional callback(completed, total) for progress tracking
+            
+        Returns:
+            List of embedding vectors (in same order as input)
+        """
+        if not texts:
+            return []
+        
+        concurrent_batches = self.config.rag_embed_concurrent_batches
+        
+        # Create batches
+        batches: List[tuple[int, List[str]]] = []
+        for i in range(0, len(texts), self.batch_size):
+            batch = texts[i:i + self.batch_size]
+            batches.append((len(batches), batch))
+        
+        total_batches = len(batches)
+        logger.info(
+            f"Embedding {len(texts)} texts in {total_batches} batches "
+            f"({concurrent_batches} concurrent)"
+        )
+        
+        # Connection pooling for efficiency
+        connector = aiohttp.TCPConnector(limit=concurrent_batches * 2)
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        
+        all_results: List[tuple[int, List[List[float]]]] = []
+        completed = 0
+        
+        async with aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+        ) as session:
+            # Process batches in groups of concurrent_batches
+            for group_start in range(0, total_batches, concurrent_batches):
+                group_end = min(group_start + concurrent_batches, total_batches)
+                current_group = batches[group_start:group_end]
+                
+                # Fire all concurrent requests
+                tasks = [
+                    self._embed_batch_aiohttp(session, batch, idx)
+                    for idx, batch in current_group
+                ]
+                
+                # Wait for group to complete
+                group_results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Process results
+                for result in group_results:
+                    if isinstance(result, BaseException):
+                        logger.error(f"Batch failed with exception: {result}")
+                        continue
+                    # Type-safe append after exception check
+                    all_results.append(result)  # type: ignore[arg-type]
+                
+                completed += len(current_group)
+                if progress_callback:
+                    progress_callback(completed, total_batches)
+        
+        # Sort by batch index and flatten
+        all_results.sort(key=lambda x: x[0])
+        embeddings = []
+        for _, batch_embeddings in all_results:
+            embeddings.extend(batch_embeddings)
+        
+        return embeddings
+    
+    async def embed_chunks_concurrent(
+        self,
+        chunks: List[ChildChunk],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> List[ChildChunk]:
+        """
+        Embed chunks with concurrent batch processing.
+        
+        OPTIMIZATION: Uses concurrent embedding for text chunks.
+        
+        Args:
+            chunks: List of ChildChunk objects
+            progress_callback: Optional callback for progress tracking
+            
+        Returns:
+            Chunks with embeddings populated
+        """
+        # Separate text and image chunks
+        text_chunks = []
+        image_chunks = []
+        
+        for chunk in chunks:
+            if chunk.image_data:
+                image_chunks.append(chunk)
+            else:
+                text_chunks.append(chunk)
+        
+        # Embed text chunks concurrently
+        if text_chunks:
+            texts = [c.text for c in text_chunks]
+            text_embeddings = await self.embed_texts_concurrent(texts, progress_callback)
+            
+            for chunk, embedding in zip(text_chunks, text_embeddings):
+                chunk.embedding = embedding
+        
+        # Embed image chunks (sequential, usually fewer)
+        if image_chunks and self.config.rag_multimodal_embedding_enabled:
+            images = [c.image_data for c in image_chunks]
+            image_embeddings = await self.embed_images(images)
+            
+            for chunk, embedding in zip(image_chunks, image_embeddings):
+                chunk.image_embedding = embedding
+        
+        return chunks
