@@ -77,11 +77,13 @@ class OCRIngestionMode(Enum):
     Determines which OCR provider to use during ingestion:
     - QWEN: Use Qwen3-VL for OCR
     - DEEPSEEK: Use DeepSeek OCR
+    - LOCAL_VRAG: Use local Visual RAG API (LightOnOCR-2-1B)
     - OFF: Skip OCR, only extract native text
     - AUTO: System decides based on file analysis
     """
     QWEN = "qwen"
     DEEPSEEK = "deepseek"
+    LOCAL_VRAG = "local_vrag"
     OFF = "off"
     AUTO = "auto"
 
@@ -386,6 +388,8 @@ def resolve_ocr_mode(
         return OCRIngestionMode.QWEN, None
     elif mode_lower == "deepseek":
         return OCRIngestionMode.DEEPSEEK, None
+    elif mode_lower == "local_vrag":
+        return OCRIngestionMode.LOCAL_VRAG, None
     elif mode_lower == "off":
         return OCRIngestionMode.OFF, None
     elif mode_lower == "auto":
@@ -793,8 +797,8 @@ class OCRProcessor:
                     self._total_network_retries += 1
                 with attempt:
                     result = await _execute_request()
-                result.network_retry_count = network_retry_count
-                return result
+                    result.network_retry_count = network_retry_count
+                    return result
 
         except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
             logger.error(f"OCR network error: {e}")
@@ -818,6 +822,17 @@ class OCRProcessor:
                 error=str(e),
                 network_retry_count=network_retry_count,
             )
+
+        # Fallback return (should never be reached)
+        return OCRResult(
+            text="",
+            confidence=0.0,
+            has_tables=False,
+            tables=[],
+            mode_used=mode,
+            error="Unexpected code path - no OCR result",
+            network_retry_count=network_retry_count,
+        )
     
     async def _fallback_ocr(self, image_data: bytes) -> OCRResult:
         """
