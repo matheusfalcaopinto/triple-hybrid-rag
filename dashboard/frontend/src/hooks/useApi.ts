@@ -7,13 +7,13 @@ import { useState, useCallback } from 'react';
 // Dynamic API base URL - uses the same host as the frontend
 // When using Vite proxy, use relative path; otherwise use the full URL
 const getApiBase = () => {
-  // In development with Vite proxy, use relative path
-  if (import.meta.env.DEV) {
-    return '/api';
-  }
-  // In production, use HTTPS (same protocol as frontend)
-  const hostname = window.location.hostname;
-  return `https://${hostname}:8009/api`;
+    // In development with Vite proxy, use relative path
+    if (import.meta.env.DEV) {
+        return '/api';
+    }
+    // In production, use HTTPS (same protocol as frontend)
+    const hostname = window.location.hostname;
+    return `https://${hostname}:8009/api`;
 };
 
 const API_BASE = getApiBase();
@@ -114,6 +114,7 @@ export interface ChunkDetail {
     token_count: number;
     page?: number;
     modality?: string;
+    has_image?: boolean;
 }
 
 export interface ParentChunkDetail {
@@ -198,7 +199,6 @@ export interface MetricsResponse {
         query_expansion_enabled: boolean;
         diversity_enabled: boolean;
         ocr_enabled: boolean;
-        ocr_mode: string;
     };
     ingestion_jobs: {
         total: number;
@@ -521,6 +521,108 @@ export function useMetrics() {
     return {
         ...state,
         fetchMetrics,
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GRAPH VISUALIZATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export interface GraphNode {
+    id: string;
+    name: string;
+    type: string;
+    mentions: number;
+}
+
+export interface GraphEdge {
+    id: string;
+    source: string;
+    target: string;
+    type: string;
+    confidence: number | null;
+}
+
+export interface GraphData {
+    nodes: GraphNode[];
+    edges: GraphEdge[];
+    stats: {
+        total_nodes: number;
+        total_edges: number;
+        entity_types: string[];
+    };
+    error?: string;
+}
+
+export interface GraphEntityMention {
+    chunk_id: string;
+    char_start: number | null;
+    char_end: number | null;
+    confidence: number | null;
+    text_snippet: string;
+    document: string;
+}
+
+export interface GraphEntityRelation {
+    id: string;
+    type: string;
+    confidence: number | null;
+    target?: { id: string; name: string; type: string };
+    source?: { id: string; name: string; type: string };
+}
+
+export interface EntityDetails {
+    entity: {
+        id: string;
+        name: string;
+        type: string;
+        tenant_id: string;
+    };
+    mentions: GraphEntityMention[];
+    relations: {
+        outgoing: GraphEntityRelation[];
+        incoming: GraphEntityRelation[];
+    };
+    stats: {
+        mention_count: number;
+        outgoing_relations: number;
+        incoming_relations: number;
+    };
+}
+
+export function useGraph() {
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const getGraphData = useCallback(async (limit = 500): Promise<GraphData | null> => {
+        setLoading(true);
+        setError(null);
+        try {
+            const data = await fetchApi<GraphData>(`/graph/data?limit=${limit}`);
+            return data;
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Failed to load graph data';
+            setError(message);
+            return null;
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    const getEntityDetails = useCallback(async (entityId: string): Promise<EntityDetails | null> => {
+        try {
+            return await fetchApi<EntityDetails>(`/graph/entity/${entityId}`);
+        } catch (err) {
+            console.error('Failed to load entity details:', err);
+            return null;
+        }
+    }, []);
+
+    return {
+        loading,
+        error,
+        getGraphData,
+        getEntityDetails,
     };
 }
 

@@ -3,7 +3,7 @@ Dashboard Backend - Triple-Hybrid-RAG
 
 FastAPI backend for the RAG dashboard supporting:
 - Multimodal file ingestion (PDF, DOCX, XLSX, CSV, images)
-- OCR processing (Qwen3-VL or DeepSeek)
+- OCR processing via Local Visual RAG API
 - Triple-hybrid retrieval (lexical + semantic + graph)
 - Configuration management
 - Database browsing
@@ -36,10 +36,11 @@ load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 from triple_hybrid_rag.config import RAGConfig, get_settings, reset_settings
 from triple_hybrid_rag.ingestion.loaders import DocumentLoader, FileType
-from triple_hybrid_rag.ingestion.ocr import OCRProcessor, OCRIngestionMode, resolve_ocr_mode
+from triple_hybrid_rag.ingestion.ocr import OCRIngestionMode, resolve_ocr_mode
+from triple_hybrid_rag.core.local_vrag_ocr import LocalVisualRAGOCR
 from triple_hybrid_rag.core.chunker import HierarchicalChunker
-from triple_hybrid_rag.core.embedder import get_embedder
-from triple_hybrid_rag.core.entity_extractor import EntityRelationExtractor
+from triple_hybrid_rag.core.embedder import get_embedder, reset_embedder
+from triple_hybrid_rag.core.entity_extractor import EntityRelationExtractor, GraphEntityStore
 from triple_hybrid_rag.core.fusion import RRFFusion
 from triple_hybrid_rag.core.reranker import get_reranker
 from triple_hybrid_rag.types import SearchChannel, Modality, SearchResult
@@ -58,6 +59,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup_event():
+    """Reset singletons on startup to ensure fresh config is used."""
+    reset_embedder()
+    reset_settings()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODELS
@@ -80,6 +87,8 @@ class IngestionStage(BaseModel):
     status: str  # pending, running, completed, failed
     items_processed: int = 0
     error: Optional[str] = None
+    messages: List[str] = []  # Detailed log messages for UI
+    details: Dict[str, Any] = {}  # Key-value details for UI
 
 class IngestionJob(BaseModel):
     """Ingestion job status."""
@@ -114,8 +123,7 @@ async def get_info():
         "api_version": "2.0.0",
         "rag_enabled": config.rag_enabled,
         "database_url": config.database_url.split("@")[-1] if "@" in config.database_url else "configured",
-        "puppygraph_url": config.puppygraph_web_ui_url,
-        "ocr_mode": config.rag_ocr_mode,
+        "image_processing_mode": config.rag_image_processing_mode,
         "supported_formats": ["pdf", "docx", "doc", "xlsx", "xls", "csv", "txt", "md", "png", "jpg", "jpeg", "webp"],
     }
 
@@ -130,7 +138,7 @@ def get_config_metadata() -> Dict[str, Dict]:
         "rag_enabled": {"category": "Feature Flags", "type": "boolean", "description": "Master enable/disable"},
         "rag_lexical_enabled": {"category": "Feature Flags", "type": "boolean", "description": "Enable lexical (BM25) search"},
         "rag_semantic_enabled": {"category": "Feature Flags", "type": "boolean", "description": "Enable semantic (vector) search"},
-        "rag_graph_enabled": {"category": "Feature Flags", "type": "boolean", "description": "Enable graph (PuppyGraph) search"},
+        "rag_graph_enabled": {"category": "Feature Flags", "type": "boolean", "description": "Enable graph (SQL-based) search"},
         "rag_rerank_enabled": {"category": "Feature Flags", "type": "boolean", "description": "Enable reranking"},
         "rag_denoise_enabled": {"category": "Feature Flags", "type": "boolean", "description": "Enable conformal denoising"},
         "rag_query_planner_enabled": {"category": "Feature Flags", "type": "boolean", "description": "Enable query planner"},
@@ -139,9 +147,10 @@ def get_config_metadata() -> Dict[str, Dict]:
         "rag_multimodal_embedding_enabled": {"category": "Feature Flags", "type": "boolean", "description": "Enable multimodal embeddings"},
         
         # OCR Settings
-        "rag_ocr_mode": {"category": "OCR", "type": "string", "description": "OCR mode: qwen, deepseek, off, auto"},
-        "rag_deepseek_ocr_enabled": {"category": "OCR", "type": "boolean", "description": "Use DeepSeek OCR"},
+        "rag_image_processing_mode": {"category": "OCR", "type": "string", "description": "Image processing mode: text, image, both, auto"},
         "rag_gundam_tiling_enabled": {"category": "OCR", "type": "boolean", "description": "Enable Gundam Tiling for large images"},
+        "local_vrag_api_base": {"category": "OCR", "type": "string", "description": "Local Visual RAG API base URL"},
+        "local_vrag_timeout": {"category": "OCR", "type": "integer", "description": "Local Visual RAG API timeout (seconds)", "min": 10, "max": 300},
         
         # HyDE
         "rag_hyde_enabled": {"category": "HyDE", "type": "boolean", "description": "Enable HyDE for query transformation"},
@@ -199,15 +208,10 @@ def get_config_metadata() -> Dict[str, Dict]:
         "jina_embed_model": {"category": "Jina AI", "type": "string", "description": "Jina embedding model"},
         "jina_embed_dimensions": {"category": "Jina AI", "type": "integer", "description": "Jina embedding dimensions", "min": 256, "max": 2048},
         "jina_rerank_model": {"category": "Jina AI", "type": "string", "description": "Jina reranker model"},
-        "rag_image_ingestion_mode": {"category": "Jina AI", "type": "string", "description": "Image mode: ocr, direct, or auto"},
         
         # Database
         "database_url": {"category": "Database", "type": "string", "description": "PostgreSQL connection URL"},
         "database_pool_size": {"category": "Database", "type": "integer", "description": "Connection pool size", "min": 1, "max": 100},
-        
-        # PuppyGraph
-        "puppygraph_bolt_url": {"category": "PuppyGraph", "type": "string", "description": "PuppyGraph Bolt protocol URL"},
-        "puppygraph_web_ui_url": {"category": "PuppyGraph", "type": "string", "description": "PuppyGraph Web UI URL"},
         
         # Entity Extraction
         "rag_ner_model": {"category": "Entity Extraction", "type": "string", "description": "NER model"},
@@ -267,8 +271,13 @@ async def update_config(update: ConfigUpdate):
     # Write back
     env_path.write_text("\n".join(env_lines))
     
-    # Reload settings
+    # CRITICAL: Force reload environment variables into os.environ
+    # This ensures the running process sees the new values immediately
+    load_dotenv(env_path, override=True)
+    
+    # Reset the singleton config to pick up new values
     reset_settings()
+    reset_embedder()
     
     return {"status": "updated", "updated_keys": list(update.updates.keys())}
 
@@ -289,6 +298,14 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # Persistent storage for original files (not temp)
 DOCUMENT_STORAGE_DIR = PROJECT_ROOT / "storage" / "documents"
 DOCUMENT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+import math
+
+def _safe_float(value: float, default: float = 0.0) -> float:
+    """Convert NaN/Inf to a safe JSON-serializable value."""
+    if value is None or (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
+        return default
+    return value
 
 def _vector_literal(values: List[float]) -> str:
     """Convert embedding to PostgreSQL vector literal."""
@@ -333,6 +350,7 @@ async def run_ingestion(job_id: str, file_path: Path) -> None:
         # Stage 1: Document Loading
         # ═══════════════════════════════════════════════════════════════════
         stages[0].status = "running"
+        stages[0].messages.append(f"Loading file: {file_path.name}")
         job.progress = 0.05
         job.updated_at = datetime.utcnow().isoformat()
         
@@ -345,44 +363,115 @@ async def run_ingestion(job_id: str, file_path: Path) -> None:
         job.file_type = document.file_type.value
         stages[0].status = "completed"
         stages[0].items_processed = len(document.pages)
+        stages[0].messages.append(f"Loaded {len(document.pages)} pages")
+        stages[0].details = {
+            "file_type": document.file_type.value,
+            "pages": len(document.pages),
+            "has_text": any(p.text.strip() for p in document.pages),
+            "has_images": any(p.has_images or p.is_scanned for p in document.pages),
+        }
         job.progress = 0.15
         job.updated_at = datetime.utcnow().isoformat()
         
         # ═══════════════════════════════════════════════════════════════════
-        # Stage 2: OCR Processing
+        # Stage 2: OCR / Image Processing
         # ═══════════════════════════════════════════════════════════════════
         stages[1].status = "running"
+        stages[1].name = "OCR/Image"
         job.updated_at = datetime.utcnow().isoformat()
         
-        # Find pages needing OCR
-        pages_needing_ocr = [
+        # Determine image ingestion mode based on new config
+        image_processing_mode = getattr(config, 'rag_image_processing_mode', 'auto').lower()
+        embed_provider = getattr(config, 'rag_embed_provider', 'local').lower()
+        multimodal_enabled = getattr(config, 'rag_multimodal_embedding_enabled', False)
+        ocr_enabled = getattr(config, 'rag_ocr_enabled', False)
+        
+        stages[1].messages.append(f"Config: image_processing_mode={image_processing_mode}, embed_provider={embed_provider}")
+        stages[1].messages.append(f"Multimodal embedding: {'enabled' if multimodal_enabled else 'disabled'}")
+        stages[1].messages.append(f"OCR: {'enabled' if ocr_enabled else 'disabled'}")
+        
+        # Find pages with images
+        pages_with_images = [
             (i, page) for i, page in enumerate(document.pages)
             if page.is_scanned or (page.has_images and page.image_data)
         ]
         
-        ocr_texts: Dict[int, str] = {}
+        stages[1].messages.append(f"Found {len(pages_with_images)} pages with images/scans")
         
-        if pages_needing_ocr and config.rag_ocr_enabled:
-            ocr_mode, _ = resolve_ocr_mode(
-                mode=config.rag_ocr_mode,
-                document=document,
-                file_path=str(file_path),
-                config=config,
-            )
-            
-            if ocr_mode != OCRIngestionMode.OFF:
-                ocr_processor = OCRProcessor.create_for_mode(
-                    ingestion_mode=ocr_mode,
-                    settings=config,
-                )
+        ocr_texts: Dict[int, str] = {}
+        image_data_for_embedding: Dict[int, bytes] = {}
+        
+        # Determine processing mode based on rag_image_processing_mode
+        # Values: text (OCR only), image (embedding only), both (OCR + embedding), auto
+        use_ocr = image_processing_mode in ('text', 'both', 'auto') and ocr_enabled
+        use_image_embedding = image_processing_mode in ('image', 'both') and multimodal_enabled
+        
+        # Auto mode: use OCR if no multimodal, otherwise use both if available
+        if image_processing_mode == 'auto':
+            use_image_embedding = multimodal_enabled
+            use_ocr = ocr_enabled
+        
+        if use_ocr and use_image_embedding:
+            stages[1].details["decision"] = "both_ocr_and_image"
+        elif use_image_embedding:
+            stages[1].details["decision"] = "image_embedding"
+        elif use_ocr:
+            stages[1].details["decision"] = "ocr_text"
+        else:
+            stages[1].details["decision"] = "none"
+        
+        if pages_with_images:
+            # BOTH MODE: Extract OCR text AND collect images for embedding
+            if use_ocr and use_image_embedding:
+                stages[1].messages.append("→ Using BOTH mode (OCR text + Image embedding)")
                 
-                for page_idx, page in pages_needing_ocr:
+                ocr_processor = LocalVisualRAGOCR(config=config)
+                
+                for page_idx, page in pages_with_images:
+                    if page.image_data:
+                        # Do OCR
+                        result = await ocr_processor.process_image(page.image_data)
+                        if result.text and not result.error:
+                            ocr_texts[page_idx] = result.text
+                            stages[1].messages.append(f"  • OCR page {page_idx + 1}: {len(result.text)} chars")
+                        
+                        # Also collect image for embedding
+                        image_data_for_embedding[page_idx] = page.image_data
+                
+                stages[1].messages.append(f"  ✓ OCR: {len(ocr_texts)} pages, Images: {len(image_data_for_embedding)} pages")
+                stages[1].items_processed = len(ocr_texts) + len(image_data_for_embedding)
+                stages[1].details["ocr_pages"] = len(ocr_texts)
+                stages[1].details["images_collected"] = len(image_data_for_embedding)
+            
+            # IMAGE EMBEDDING ONLY (no OCR)
+            elif use_image_embedding:
+                stages[1].messages.append("→ Using image embedding only (multimodal)")
+                for page_idx, page in pages_with_images:
+                    if page.image_data:
+                        image_data_for_embedding[page_idx] = page.image_data
+                        stages[1].messages.append(f"  • Collected image from page {page_idx + 1}")
+                stages[1].items_processed = len(image_data_for_embedding)
+                stages[1].details["images_collected"] = len(image_data_for_embedding)
+            
+            # OCR ONLY (no image embedding)
+            elif use_ocr:
+                stages[1].messages.append("→ Using OCR text extraction only")
+                ocr_processor = LocalVisualRAGOCR(config=config)
+                
+                for page_idx, page in pages_with_images:
                     if page.image_data:
                         result = await ocr_processor.process_image(page.image_data)
                         if result.text and not result.error:
                             ocr_texts[page_idx] = result.text
+                            stages[1].messages.append(f"  • OCR page {page_idx + 1}: {len(result.text)} chars")
                 
                 stages[1].items_processed = len(ocr_texts)
+                stages[1].details["ocr_pages"] = len(ocr_texts)
+            else:
+                stages[1].messages.append("⚠ No processing: OCR disabled and image embedding not available")
+                stages[1].details["skipped"] = True
+        else:
+            stages[1].messages.append("No images found - skipping image processing")
         
         stages[1].status = "completed"
         job.progress = 0.30
@@ -392,16 +481,20 @@ async def run_ingestion(job_id: str, file_path: Path) -> None:
         # Stage 3: Text Aggregation & Chunking
         # ═══════════════════════════════════════════════════════════════════
         stages[2].status = "running"
+        stages[2].messages.append("Aggregating text from all sources...")
         job.updated_at = datetime.utcnow().isoformat()
         
         # Aggregate text from all sources
         text_parts = []
+        native_text_pages = 0
         for i, page in enumerate(document.pages):
             if page.text.strip():
                 text_parts.append(f"[Page {page.page_number}]\n{page.text}")
+                native_text_pages += 1
             
-            # Add OCR text
-            if i in ocr_texts:
+            # Add OCR text (but NOT for pages that will get combined text+image embedding)
+            # Those will be handled separately as multimodal chunks
+            if i in ocr_texts and i not in image_data_for_embedding:
                 text_parts.append(f"[Page {page.page_number} - OCR]\n{ocr_texts[i]}")
             
             # Add tables
@@ -409,54 +502,228 @@ async def run_ingestion(job_id: str, file_path: Path) -> None:
                 text_parts.append(f"[Table - Page {page.page_number}]\n{table}")
         
         full_text = "\n\n".join(text_parts)
-        
-        if not full_text.strip():
-            raise Exception("No text content extracted from document")
-        
-        # Chunking
         document_id = uuid4()
-        chunker = HierarchicalChunker(config=config)
-        parent_chunks, child_chunks = chunker.split_document(
-            text=full_text,
-            document_id=document_id,
-            tenant_id="default",
-        )
+        
+        # Check if we have text content OR images for direct embedding
+        has_text = bool(full_text.strip())
+        has_images_for_embedding = bool(image_data_for_embedding)
+        
+        # Pages with BOTH OCR text AND image (for combined embedding)
+        combined_pages = set(ocr_texts.keys()) & set(image_data_for_embedding.keys())
+        # Pages with image only (no OCR text)
+        image_only_pages = set(image_data_for_embedding.keys()) - set(ocr_texts.keys())
+        
+        stages[2].messages.append(f"Native text from {native_text_pages} pages")
+        stages[2].messages.append(f"OCR text from {len(ocr_texts)} pages")
+        stages[2].messages.append(f"Combined text+image pages: {len(combined_pages)}")
+        stages[2].messages.append(f"Image-only pages: {len(image_only_pages)}")
+        stages[2].details["has_text"] = has_text
+        stages[2].details["has_images"] = has_images_for_embedding
+        stages[2].details["combined_pages"] = len(combined_pages)
+        
+        if not has_text and not has_images_for_embedding:
+            raise Exception("No text content extracted from document and no images available for direct embedding. Enable OCR or set RAG_IMAGE_PROCESSING_MODE=both with multimodal embedding.")
+        
+        parent_chunks = []
+        child_chunks = []
+        
+        if has_text:
+            stages[2].messages.append("→ Creating text chunks (hierarchical)...")
+            chunker = HierarchicalChunker(config=config)
+            parent_chunks, child_chunks = chunker.split_document(
+                text=full_text,
+                document_id=document_id,
+                tenant_id="default",
+            )
+            stages[2].messages.append(f"  • {len(parent_chunks)} parent chunks")
+            stages[2].messages.append(f"  • {len(child_chunks)} child chunks")
+        
+        # Create multimodal chunks for pages with BOTH OCR text AND image
+        # These will use combined text+image embedding
+        multimodal_chunks = []
+        if combined_pages:
+            stages[2].messages.append("→ Creating multimodal chunks (OCR text + image)...")
+            from triple_hybrid_rag.types import ChildChunk, ParentChunk
+            
+            for page_idx in sorted(combined_pages):
+                page_num = page_idx + 1
+                ocr_text = ocr_texts[page_idx]
+                img_data = image_data_for_embedding[page_idx]
+                
+                chunk_id = uuid4()
+                parent_id = uuid4()
+                
+                # Create parent chunk with OCR text
+                mm_parent = ParentChunk(
+                    id=parent_id,
+                    document_id=document_id,
+                    tenant_id="default",
+                    index_in_document=len(parent_chunks) + page_idx,
+                    text=ocr_text[:500] + "..." if len(ocr_text) > 500 else ocr_text,
+                    token_count=len(ocr_text.split()),
+                    page_start=page_num,
+                )
+                parent_chunks.append(mm_parent)
+                
+                # Create child chunk with BOTH text and image
+                mm_chunk = ChildChunk(
+                    id=chunk_id,
+                    parent_id=parent_id,
+                    document_id=document_id,
+                    tenant_id="default",
+                    index_in_parent=0,
+                    text=ocr_text,  # Full OCR text
+                    token_count=len(ocr_text.split()),
+                    page=page_num,
+                    modality=Modality.IMAGE,  # Mark as multimodal
+                )
+                mm_chunk.image_data = img_data
+                mm_chunk.ocr_text = ocr_text  # Store OCR text for combined embedding
+                multimodal_chunks.append(mm_chunk)
+            
+            stages[2].messages.append(f"  • {len(multimodal_chunks)} multimodal chunks created")
+        
+        # Create image-only chunks (no OCR text available)
+        image_only_chunks = []
+        if image_only_pages:
+            stages[2].messages.append("→ Creating image-only chunks...")
+            from triple_hybrid_rag.types import ChildChunk, ParentChunk
+            
+            for page_idx in sorted(image_only_pages):
+                page_num = page_idx + 1
+                img_data = image_data_for_embedding[page_idx]
+                
+                chunk_id = uuid4()
+                parent_id = uuid4()
+                
+                img_parent = ParentChunk(
+                    id=parent_id,
+                    document_id=document_id,
+                    tenant_id="default",
+                    index_in_document=len(parent_chunks) + page_idx,
+                    text=f"[Image Page {page_num}]",
+                    token_count=10,
+                    page_start=page_num,
+                )
+                parent_chunks.append(img_parent)
+                
+                img_chunk = ChildChunk(
+                    id=chunk_id,
+                    parent_id=parent_id,
+                    document_id=document_id,
+                    tenant_id="default",
+                    index_in_parent=0,
+                    text=f"[Image from page {page_num}]",
+                    token_count=10,
+                    page=page_num,
+                    modality=Modality.IMAGE,
+                )
+                img_chunk.image_data = img_data
+                image_only_chunks.append(img_chunk)
+            
+            stages[2].messages.append(f"  • {len(image_only_chunks)} image-only chunks created")
+        
+        all_chunks = child_chunks + multimodal_chunks + image_only_chunks
         
         stages[2].status = "completed"
-        stages[2].items_processed = len(child_chunks)
+        stages[2].items_processed = len(all_chunks)
+        stages[2].details["text_chunks"] = len(child_chunks)
+        stages[2].details["multimodal_chunks"] = len(multimodal_chunks)
+        stages[2].details["image_only_chunks"] = len(image_only_chunks)
+        stages[2].details["total_chunks"] = len(all_chunks)
         job.progress = 0.45
         job.updated_at = datetime.utcnow().isoformat()
         
         # ═══════════════════════════════════════════════════════════════════
-        # Stage 4: Embedding
+        # Stage 4: Embedding (Text, Multimodal, Images)
         # ═══════════════════════════════════════════════════════════════════
         stages[3].status = "running"
+        stages[3].messages.append(f"Embedding provider: {embed_provider}")
         job.updated_at = datetime.utcnow().isoformat()
         
         embedder = get_embedder(config)
-        texts = [chunk.text for chunk in child_chunks]
+        stages[3].details["provider"] = embed_provider
         
         try:
-            embeddings = await embedder.embed_texts(texts)
+            # 1. Embed text-only chunks
+            if child_chunks:
+                stages[3].messages.append(f"→ Embedding {len(child_chunks)} text chunks...")
+                texts = [chunk.text for chunk in child_chunks]
+                text_embeddings = await embedder.embed_texts(texts)
+                for chunk, embedding in zip(child_chunks, text_embeddings):
+                    chunk.embedding = embedding
+                stages[3].messages.append(f"  ✓ Text embeddings complete (dim={len(text_embeddings[0]) if text_embeddings else 0})")
+                stages[3].details["text_embeddings"] = len(text_embeddings)
             
-            for chunk, embedding in zip(child_chunks, embeddings):
-                chunk.embedding = embedding
+            # 2. Embed multimodal chunks (combined text+image embedding)
+            if multimodal_chunks and hasattr(embedder, 'embed_image'):
+                stages[3].messages.append(f"→ Embedding {len(multimodal_chunks)} multimodal chunks (text+image)...")
+                embedded_count = 0
+                failed_count = 0
+                for mm_chunk in multimodal_chunks:
+                    if hasattr(mm_chunk, 'image_data') and mm_chunk.image_data:
+                        try:
+                            # Use combined text+image embedding
+                            ocr_text = getattr(mm_chunk, 'ocr_text', mm_chunk.text)
+                            combined_embedding = await embedder.embed_image(
+                                mm_chunk.image_data, 
+                                text=ocr_text  # Pass OCR text for combined embedding
+                            )
+                            # Store as both text and image embedding for maximum retrieval coverage
+                            mm_chunk.embedding = combined_embedding
+                            mm_chunk.image_embedding = combined_embedding
+                            embedded_count += 1
+                            stages[3].messages.append(f"  ✓ Page {mm_chunk.page} embedded (text+image combined)")
+                        except Exception as e:
+                            failed_count += 1
+                            stages[3].messages.append(f"  ✗ Page {mm_chunk.page} failed: {str(e)[:50]}")
+                
+                stages[3].details["multimodal_embeddings"] = embedded_count
+                stages[3].details["multimodal_failures"] = failed_count
+            
+            # 3. Embed image-only chunks
+            if image_only_chunks and hasattr(embedder, 'embed_image'):
+                stages[3].messages.append(f"→ Embedding {len(image_only_chunks)} image-only chunks...")
+                embedded_count = 0
+                failed_count = 0
+                for img_chunk in image_only_chunks:
+                    if hasattr(img_chunk, 'image_data') and img_chunk.image_data:
+                        try:
+                            img_embedding = await embedder.embed_image(img_chunk.image_data)
+                            img_chunk.image_embedding = img_embedding
+                            embedded_count += 1
+                            stages[3].messages.append(f"  ✓ Page {img_chunk.page} embedded (image only)")
+                        except Exception as e:
+                            failed_count += 1
+                            stages[3].messages.append(f"  ✗ Page {img_chunk.page} failed: {str(e)[:50]}")
+                
+                stages[3].details["image_embeddings"] = embedded_count
+                stages[3].details["image_failures"] = failed_count
+            elif image_only_chunks:
+                stages[3].messages.append("⚠ Image chunks exist but embedder doesn't support images")
             
             stages[3].status = "completed"
-            stages[3].items_processed = len(embeddings)
+            stages[3].items_processed = len(child_chunks) + len(multimodal_chunks) + len(image_only_chunks)
+        # NOTE: Do NOT close embedder here as it is a singleton shared across requests
         finally:
-            await embedder.close()
+            # await embedder.close()
+            pass
         
         job.progress = 0.65
         job.updated_at = datetime.utcnow().isoformat()
+        
+        # NOTE: PuppyGraph refresh is triggered AFTER database storage and entity extraction
+        # (see "Final Step" section) to ensure data is available when graph syncs.
         
         # ═══════════════════════════════════════════════════════════════════
         # Stage 5: Database Storage
         # ═══════════════════════════════════════════════════════════════════
         stages[4].status = "running"
+        stages[4].messages.append("Connecting to PostgreSQL database...")
         job.updated_at = datetime.utcnow().isoformat()
         
         pool = await asyncpg.create_pool(config.database_url, min_size=1, max_size=5)
+        stages[4].messages.append("✓ Database connection established")
         
         try:
             async with pool.acquire() as conn:
@@ -490,30 +757,49 @@ async def run_ingestion(job_id: str, file_path: Path) -> None:
                         datetime.utcnow())
                     parent_id_map[str(parent.id)] = parent_db_id
                 
-                # Insert child chunks with embeddings
+                # Insert child chunks (text and image) with embeddings
                 chunks_stored = 0
-                for idx, chunk in enumerate(child_chunks):
+                for idx, chunk in enumerate(all_chunks):
                     parent_db_id = parent_id_map.get(str(chunk.parent_id))
                     content_hash = hashlib.sha256(chunk.text.encode()).hexdigest()
                     
-                    embedding_str = _vector_literal(chunk.embedding) if chunk.embedding else None
+                    # Handle text embedding
+                    embedding_str = _vector_literal(chunk.embedding) if getattr(chunk, 'embedding', None) else None
                     
-                    await conn.execute("""
+                    # Handle image embedding
+                    image_embedding_str = _vector_literal(chunk.image_embedding) if getattr(chunk, 'image_embedding', None) else None
+                    
+                    # Handle image data (store raw bytes for display)
+                    image_bytes = getattr(chunk, 'image_data', None)
+                    
+                    persisted_id = await conn.fetchval("""
                         INSERT INTO rag_child_chunks (
                             id, parent_id, document_id, tenant_id, index_in_parent,
-                            text, token_count, content_hash, embedding_1024,
-                            page, modality, created_at
+                            text, token_count, content_hash, embedding_1024, image_embedding_1024,
+                            image_data, page, modality, created_at
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10, $11, $12)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10::vector, $11, $12, $13, $14)
                         ON CONFLICT (tenant_id, content_hash) DO UPDATE SET
-                            embedding_1024 = EXCLUDED.embedding_1024
+                            embedding_1024 = COALESCE(EXCLUDED.embedding_1024, rag_child_chunks.embedding_1024),
+                            image_embedding_1024 = COALESCE(EXCLUDED.image_embedding_1024, rag_child_chunks.image_embedding_1024),
+                            image_data = COALESCE(EXCLUDED.image_data, rag_child_chunks.image_data)
+                        RETURNING id
                     """, chunk.id, parent_db_id, doc_id, "default", idx,
-                        chunk.text, chunk.token_count, content_hash, embedding_str,
-                        chunk.page, chunk.modality.value, datetime.utcnow())
+                        chunk.text, chunk.token_count, content_hash, embedding_str, image_embedding_str,
+                        image_bytes, chunk.page, chunk.modality.value, datetime.utcnow())
+                    
+                    # CRITICAL: Update in-memory chunk ID to match persisted ID (in case of deduplication)
+                    # This ensures Entity Extraction uses the correct FK
+                    if persisted_id:
+                        chunk.id = persisted_id
+                        
                     chunks_stored += 1
             
             stages[4].status = "completed"
             stages[4].items_processed = chunks_stored
+            stages[4].messages.append(f"✓ Stored {chunks_stored} chunks in database")
+            stages[4].details["chunks_stored"] = chunks_stored
+            stages[4].details["document_id"] = str(doc_id)
         finally:
             await pool.close()
         
@@ -528,20 +814,50 @@ async def run_ingestion(job_id: str, file_path: Path) -> None:
         
         if config.rag_entity_extraction_enabled and len(stages) > 5:
             stages[5].status = "running"
+            stages[5].messages.append("Extracting entities and relations...")
             job.updated_at = datetime.utcnow().isoformat()
             
             try:
+                # Extract entities and relations from text chunks
                 extractor = EntityRelationExtractor(config=config)
-                extraction = await extractor.extract(child_chunks[:10])  # Limit for speed
+                chunks_to_process = [c for c in child_chunks if c.modality.value == "text"][:50]  # Process more chunks
+                extraction = await extractor.extract(chunks_to_process)
                 
-                entities_count = len(extraction.entities)
-                relations_count = len(extraction.relations)
+                stages[5].messages.append(f"Extracted {len(extraction.entities)} entities, {len(extraction.relations)} relations")
+                
+                # CRITICAL: Store entities in database for PuppyGraph
+                if not extraction.is_empty:
+                    stages[5].messages.append("Storing graph data in PostgreSQL...")
+                    entity_store = GraphEntityStore(config=config)
+                    try:
+                        store_result = await entity_store.store(
+                            result=extraction,
+                            chunks=chunks_to_process,
+                            tenant_id="default",
+                            document_id=doc_id,
+                        )
+                        entities_count = store_result["entities"]
+                        relations_count = store_result["relations"]
+                        mentions_count = store_result["mentions"]
+                        stages[5].messages.append(f"✓ Stored: {entities_count} entities, {mentions_count} mentions, {relations_count} relations")
+                        stages[5].details["entities"] = entities_count
+                        stages[5].details["mentions"] = mentions_count
+                        stages[5].details["relations"] = relations_count
+                    finally:
+                        await entity_store.close()
+                else:
+                    entities_count = 0
+                    relations_count = 0
+                    stages[5].messages.append("No entities extracted from this document")
                 
                 stages[5].status = "completed"
                 stages[5].items_processed = entities_count
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 stages[5].status = "failed"
                 stages[5].error = str(e)
+                stages[5].messages.append(f"Error: {str(e)}")
         
         # ═══════════════════════════════════════════════════════════════════
         # Complete
@@ -553,8 +869,12 @@ async def run_ingestion(job_id: str, file_path: Path) -> None:
             "file_type": document.file_type.value,
             "pages": len(document.pages),
             "pages_ocr": len(ocr_texts),
+            "pages_images": len(image_data_for_embedding),
             "parent_chunks": len(parent_chunks),
-            "child_chunks": len(child_chunks),
+            "child_chunks": len(all_chunks),  # text + multimodal + image-only chunks
+            "text_chunks": len(child_chunks),
+            "multimodal_chunks": len(multimodal_chunks),
+            "image_only_chunks": len(image_only_chunks),
             "entities": entities_count,
             "relations": relations_count,
         }
@@ -638,7 +958,14 @@ async def get_ingestion_status(job_id: str):
         "file_name": job.file_name,
         "file_type": job.file_type,
         "progress": job.progress,
-        "stages": [{"name": s.name, "status": s.status, "items_processed": s.items_processed, "error": s.error} for s in job.stages],
+        "stages": [{
+            "name": s.name, 
+            "status": s.status, 
+            "items_processed": s.items_processed, 
+            "error": s.error,
+            "messages": s.messages,
+            "details": s.details,
+        } for s in job.stages],
         "result": job.result,
         "error": job.error,
         "created_at": job.created_at,
@@ -656,7 +983,14 @@ async def list_ingestion_jobs():
                 "file_name": job.file_name,
                 "file_type": job.file_type,
                 "progress": job.progress,
-                "stages": [{"name": s.name, "status": s.status, "items_processed": s.items_processed, "error": s.error} for s in job.stages],
+                "stages": [{
+                    "name": s.name, 
+                    "status": s.status, 
+                    "items_processed": s.items_processed, 
+                    "error": s.error,
+                    "messages": s.messages,
+                    "details": s.details,
+                } for s in job.stages],
                 "result": job.result,
                 "error": job.error,
                 "created_at": job.created_at,
@@ -710,32 +1044,21 @@ async def retrieve(request: QueryRequest):
                     """, request.tenant_id, request.query,
                         request.top_k or config.rag_lexical_top_k, request.collection)
             
-            # Graph search (with fallback)
+            # Graph search (using PostgreSQL)
             if config.rag_graph_enabled:
                 try:
-                    from triple_hybrid_rag.graph.puppygraph import PuppyGraphClient
-                    
-                    puppygraph = PuppyGraphClient(config=config)
-                    connected = await puppygraph.connect()
-                    
-                    if connected:
-                        keywords = request.query.split()[:5]  # Simple keyword extraction
-                        graph_results = await puppygraph.search_by_keywords_graph(
-                            keywords=keywords,
-                            tenant_id=request.tenant_id,
-                            limit=config.rag_graph_top_k,
-                        )
-                        await puppygraph.close()
-                except Exception:
-                    # Fallback to SQL
                     from triple_hybrid_rag.graph.sql_fallback import SQLGraphFallback
-                    fallback = SQLGraphFallback(pool)
-                    keywords = request.query.split()[:5]
-                    graph_results = await fallback.search_by_keywords(
+                    graph_search = SQLGraphFallback(pool)
+                    keywords = request.query.split()[:5]  # Simple keyword extraction
+                    graph_results = await graph_search.search_by_keywords(
                         keywords=keywords,
                         tenant_id=request.tenant_id,
                         limit=config.rag_graph_top_k,
                     )
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Graph search error: {e}")
+                    graph_results = []
             
             # Convert to SearchResult objects
             def row_to_search_result(row, channel: SearchChannel, score_field: str) -> SearchResult:
@@ -806,12 +1129,12 @@ async def retrieve(request: QueryRequest):
                         "document_id": str(r.document_id),
                         "text": r.text,
                         "parent_text": parent_texts.get(str(r.parent_id)),
-                        "lexical_score": r.lexical_score,
-                        "semantic_score": r.semantic_score,
-                        "graph_score": r.graph_score,
-                        "rrf_score": r.rrf_score,
-                        "rerank_score": r.rerank_score,
-                        "final_score": r.final_score,
+                        "lexical_score": _safe_float(r.lexical_score),
+                        "semantic_score": _safe_float(r.semantic_score),
+                        "graph_score": _safe_float(r.graph_score),
+                        "rrf_score": _safe_float(r.rrf_score),
+                        "rerank_score": _safe_float(r.rerank_score),
+                        "final_score": _safe_float(r.final_score),
                         "metadata": r.metadata,
                     }
                     for r in fused
@@ -1015,7 +1338,7 @@ async def delete_document(document_id: str):
                 if temp_file.exists():
                     temp_file.unlink()
                     file_deleted = True
-        
+
         return {
             "status": "deleted",
             "document_id": document_id,
@@ -1135,10 +1458,11 @@ async def get_document_details(document_id: str):
             ORDER BY index_in_document
         """, doc_uuid)
         
-        # Get child chunks
+        # Get child chunks (with has_image flag for frontend)
         child_chunks = await conn.fetch("""
             SELECT c.id, c.parent_id, c.index_in_parent, c.text, c.token_count, 
-                   c.page, c.modality, c.content_hash
+                   c.page, c.modality, c.content_hash,
+                   (c.image_data IS NOT NULL) AS has_image
             FROM rag_child_chunks c
             WHERE c.document_id = $1 
             ORDER BY c.page, c.index_in_parent
@@ -1246,6 +1570,7 @@ async def get_document_details(document_id: str):
                     'token_count': row['token_count'],
                     'page': row['page'],
                     'modality': row['modality'],
+                    'has_image': row['has_image'],
                 }
                 for row in child_chunks
             ],
@@ -1264,6 +1589,49 @@ async def get_document_details(document_id: str):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/chunks/{chunk_id}/image")
+async def get_chunk_image(chunk_id: str):
+    """
+    Serve the image data for a chunk (multimodal image chunks).
+    Returns the raw image bytes as an image response.
+    """
+    import asyncpg
+    from fastapi.responses import Response
+    
+    config = get_settings()
+    
+    try:
+        chunk_uuid = uuid.UUID(chunk_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid chunk ID format")
+    
+    try:
+        conn = await asyncpg.connect(config.database_url)
+        
+        row = await conn.fetchrow("""
+            SELECT image_data, modality FROM rag_child_chunks WHERE id = $1
+        """, chunk_uuid)
+        
+        await conn.close()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        
+        if not row['image_data']:
+            raise HTTPException(status_code=404, detail="No image data for this chunk")
+        
+        # Return image as PNG (most PDF page images are PNG)
+        return Response(
+            content=bytes(row['image_data']),
+            media_type="image/png",
+            headers={"Cache-Control": "max-age=3600"}  # Cache for 1 hour
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1317,6 +1685,207 @@ async def list_entities(limit: int = 50, offset: int = 0, entity_type: Optional[
         return {"entities": [], "error": str(e)}
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# GRAPH VISUALIZATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/graph/data")
+async def get_graph_data(limit: int = 500):
+    """
+    Get all entities and relations for graph visualization.
+    Returns nodes (entities) and edges (relations) in a format suitable for force-directed graphs.
+    """
+    import asyncpg
+    config = get_settings()
+    
+    try:
+        conn = await asyncpg.connect(config.database_url)
+        
+        # Get entities (nodes) with mention counts
+        entities = await conn.fetch("""
+            SELECT e.id, e.name, e.entity_type,
+                   (SELECT COUNT(*) FROM rag_entity_mentions m WHERE m.entity_id = e.id) as mention_count
+            FROM rag_entities e
+            ORDER BY mention_count DESC
+            LIMIT $1
+        """, limit)
+        
+        # Get entity IDs for filtering relations
+        entity_ids = [row['id'] for row in entities]
+        
+        # Get relations (edges) between these entities
+        relations = []
+        if entity_ids:
+            relations = await conn.fetch("""
+                SELECT r.id, r.subject_entity_id, r.object_entity_id, r.relation_type, r.confidence
+                FROM rag_relations r
+                WHERE r.subject_entity_id = ANY($1::uuid[])
+                  AND r.object_entity_id = ANY($1::uuid[])
+            """, entity_ids)
+        
+        await conn.close()
+        
+        # Build nodes list
+        nodes = [
+            {
+                "id": str(row["id"]),
+                "name": row["name"],
+                "type": row["entity_type"],
+                "mentions": row["mention_count"] or 0,
+            }
+            for row in entities
+        ]
+        
+        # Build edges list
+        edges = [
+            {
+                "id": str(row["id"]),
+                "source": str(row["subject_entity_id"]),
+                "target": str(row["object_entity_id"]),
+                "type": row["relation_type"],
+                "confidence": float(row["confidence"]) if row["confidence"] else None,
+            }
+            for row in relations
+        ]
+        
+        # Get unique entity types for filtering
+        entity_types = sorted(set(row["entity_type"] for row in entities))
+        
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "total_nodes": len(nodes),
+                "total_edges": len(edges),
+                "entity_types": entity_types,
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"nodes": [], "edges": [], "stats": {"total_nodes": 0, "total_edges": 0, "entity_types": []}, "error": str(e)}
+
+
+@app.get("/api/graph/entity/{entity_id}")
+async def get_entity_details(entity_id: str):
+    """
+    Get details of a specific entity including all its relations.
+    Used when clicking on a node in the graph visualization.
+    """
+    import asyncpg
+    config = get_settings()
+    
+    try:
+        entity_uuid = uuid.UUID(entity_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid entity ID format")
+    
+    try:
+        conn = await asyncpg.connect(config.database_url)
+        
+        # Get entity info
+        entity = await conn.fetchrow("""
+            SELECT e.id, e.name, e.entity_type, e.tenant_id
+            FROM rag_entities e
+            WHERE e.id = $1
+        """, entity_uuid)
+        
+        if not entity:
+            await conn.close()
+            raise HTTPException(status_code=404, detail="Entity not found")
+        
+        # Get mention count and sample mentions
+        mentions = await conn.fetch("""
+            SELECT m.child_chunk_id, m.char_start, m.char_end, m.confidence,
+                   c.text as chunk_text, d.file_name
+            FROM rag_entity_mentions m
+            JOIN rag_child_chunks c ON c.id = m.child_chunk_id
+            JOIN rag_documents d ON d.id = c.document_id
+            WHERE m.entity_id = $1
+            LIMIT 10
+        """, entity_uuid)
+        
+        # Get outgoing relations (this entity is subject)
+        outgoing = await conn.fetch("""
+            SELECT r.id, r.relation_type, r.confidence,
+                   te.id as target_id, te.name as target_name, te.entity_type as target_type
+            FROM rag_relations r
+            JOIN rag_entities te ON te.id = r.object_entity_id
+            WHERE r.subject_entity_id = $1
+        """, entity_uuid)
+        
+        # Get incoming relations (this entity is object)
+        incoming = await conn.fetch("""
+            SELECT r.id, r.relation_type, r.confidence,
+                   se.id as source_id, se.name as source_name, se.entity_type as source_type
+            FROM rag_relations r
+            JOIN rag_entities se ON se.id = r.subject_entity_id
+            WHERE r.object_entity_id = $1
+        """, entity_uuid)
+        
+        await conn.close()
+        
+        return {
+            "entity": {
+                "id": str(entity["id"]),
+                "name": entity["name"],
+                "type": entity["entity_type"],
+                "tenant_id": entity["tenant_id"],
+            },
+            "mentions": [
+                {
+                    "chunk_id": str(row["child_chunk_id"]),
+                    "char_start": row["char_start"],
+                    "char_end": row["char_end"],
+                    "confidence": float(row["confidence"]) if row["confidence"] else None,
+                    "text_snippet": row["chunk_text"][:200] + "..." if row["chunk_text"] and len(row["chunk_text"]) > 200 else row["chunk_text"],
+                    "document": row["file_name"],
+                }
+                for row in mentions
+            ],
+            "relations": {
+                "outgoing": [
+                    {
+                        "id": str(row["id"]),
+                        "type": row["relation_type"],
+                        "confidence": float(row["confidence"]) if row["confidence"] else None,
+                        "target": {
+                            "id": str(row["target_id"]),
+                            "name": row["target_name"],
+                            "type": row["target_type"],
+                        }
+                    }
+                    for row in outgoing
+                ],
+                "incoming": [
+                    {
+                        "id": str(row["id"]),
+                        "type": row["relation_type"],
+                        "confidence": float(row["confidence"]) if row["confidence"] else None,
+                        "source": {
+                            "id": str(row["source_id"]),
+                            "name": row["source_name"],
+                            "type": row["source_type"],
+                        }
+                    }
+                    for row in incoming
+                ],
+            },
+            "stats": {
+                "mention_count": len(mentions),
+                "outgoing_relations": len(outgoing),
+                "incoming_relations": len(incoming),
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # METRICS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1327,9 +1896,6 @@ async def get_metrics():
     
     # Get database stats
     stats = await get_database_stats()
-    
-    # OCR is enabled if rag_ocr_enabled=True AND mode is not "off"
-    ocr_effectively_enabled = config.rag_ocr_enabled and config.rag_ocr_mode.lower() != "off"
     
     return {
         "database": stats,
@@ -1342,8 +1908,7 @@ async def get_metrics():
             "hyde_enabled": config.rag_hyde_enabled,
             "query_expansion_enabled": config.rag_query_expansion_enabled,
             "diversity_enabled": config.rag_diversity_enabled,
-            "ocr_enabled": ocr_effectively_enabled,
-            "ocr_mode": config.rag_ocr_mode,
+            "ocr_enabled": config.rag_ocr_enabled,
         },
         "ingestion_jobs": {
             "total": len(ingestion_jobs),
@@ -1371,13 +1936,15 @@ if __name__ == "__main__":
     if ssl_keyfile.exists() and ssl_certfile.exists():
         print(f"🔒 Starting HTTPS server with certificates from {certs_dir}")
         uvicorn.run(
-            app,
+            "dashboard.backend.main:app",
             host="0.0.0.0",
             port=8009,
             ssl_keyfile=str(ssl_keyfile),
             ssl_certfile=str(ssl_certfile),
+            reload=True,
         )
     else:
         print("⚠️  SSL certificates not found, starting HTTP server")
         print(f"   Generate certificates in {certs_dir} for HTTPS support")
-        uvicorn.run(app, host="0.0.0.0", port=8009)
+        uvicorn.run("dashboard.backend.main:app", host="0.0.0.0", port=8009, reload=True)
+    # Trigger reload for timeout boost
